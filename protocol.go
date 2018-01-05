@@ -1,19 +1,19 @@
 package muxstream
 
-const PROTO_VER = 0x01
+const _PROTO_VER = 0x01
 
 // Frame struct
 // +-----+-----+-----+-----+----------+
-// | VER | SID | CMD | LEN |   DATA   |
+// | VER | CMD | SID | LEN |   DATA   |
 // +-----+-----+-----+-----+----------+
-// |  1  |  4  |  1  |  2  | Var(LEN) |
+// |  1  |  1  |  4  |  2  | Var(LEN) |
 // +-----+-----+-----+-----+----------+
 
 // Command
 const (
-	CMD_NEW_SESSION = iota
-	CMD_NEW_SESSION_ACK
-	CMD_DATA
+	_CMD_NEW_SESSION = iota
+	_CMD_DATA
+	_CMD_SESSION_CLOSE
 
-	CMD_UNKNOWN = 0xff
+	_CMD_UNKNOWN = 0xff
 )
