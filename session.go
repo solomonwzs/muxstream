@@ -7,6 +7,11 @@ import (
 	"sync"
 )
 
+const (
+	_ROLE_CLIENT = 0x01
+	_ROLE_SERVER = 0x02
+)
+
 type sessionRW struct {
 	readBuffer  []byte
 	writeBuffer []byte
@@ -48,10 +53,9 @@ type Session struct {
 	streamID     uint32
 	streamIDLock *sync.Mutex
 
-	conf *Config
-
-	eventChannel chan *event
-
+	role    uint8
+	conf    *Config
+	eCh     chan *event
 	streams map[uint32]*Stream
 }
 
@@ -61,7 +65,7 @@ func NewSession(conn net.Conn, conf *Config) *Session {
 		streamID:     0,
 		streamIDLock: &sync.Mutex{},
 		conf:         conf,
-		eventChannel: make(chan *event, _CHANNEL_SIZE),
+		eCh:          make(chan *event, _CHANNEL_SIZE),
 		streams:      make(map[uint32]*Stream),
 	}
 }
@@ -75,9 +79,8 @@ func (s *Session) recv() {
 	var (
 		twoBytes = make([]byte, 2, 2)
 		streamID uint32
-		// dataLen  uint16
-
-		err error
+		dataLen  uint16
+		err      error
 	)
 
 	for {
@@ -85,19 +88,22 @@ func (s *Session) recv() {
 		if err == nil && twoBytes[0] == _PROTO_VER {
 			switch twoBytes[1] {
 			case _CMD_NEW_STREAM:
-				newEvent(_EVENT_NEW_SESSION, nil).sendTo(s.eventChannel)
+				newEvent(_EVENT_NEW_SESSION, nil).sendTo(s.eCh)
 			case _CMD_NEW_STREAM_ACK:
-				if err = binary.Read(s.rw, binary.BigEndian, &streamID); err != nil {
-					newEvent(_EVENT_ERROR, err).sendTo(s.eventChannel)
+				err = binary.Read(s.rw, binary.BigEndian, &streamID)
+				if err != nil {
+					newEvent(_EVENT_ERROR, err).sendTo(s.eCh)
 					goto end
 				}
-				newEvent(_EVENT_NEW_SESSION_ACK, streamID).sendTo(s.eventChannel)
+				newEvent(_EVENT_NEW_SESSION_ACK, streamID).sendTo(s.eCh)
+			case _CMD_DATA:
+				err = binary.Read(s.rw, binary.BigEndian, &dataLen)
 			}
 		} else if err != nil {
-			newEvent(_EVENT_ERROR, err).sendTo(s.eventChannel)
+			newEvent(_EVENT_ERROR, err).sendTo(s.eCh)
 			goto end
 		} else {
-			newEvent(_EVENT_ERROR, _ERR_PROTO_VERSION).sendTo(s.eventChannel)
+			newEvent(_EVENT_ERROR, _ERR_PROTO_VERSION).sendTo(s.eCh)
 			goto end
 		}
 	}
