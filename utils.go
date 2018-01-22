@@ -1,12 +1,21 @@
 package muxstream
 
+import "errors"
+
 const (
 	_EVENT_SESSION_HEARTBEAT = iota
+	_EVENT_ERROR
+	_EVENT_NEW_SESSION
+	_EVENT_NEW_SESSION_ACK
 )
 
 const (
 	_BUFFER_SZIE  = 0xffff
 	_CHANNEL_SIZE = 100
+)
+
+var (
+	_ERR_PROTO_VERSION = errors.New("muxstream: error proto version")
 )
 
 var (

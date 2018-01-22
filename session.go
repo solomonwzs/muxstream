@@ -1,6 +1,7 @@
 package muxstream
 
 import (
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -37,9 +38,12 @@ func (srw *sessionRW) Read(p []byte) (n int, err error) {
 	}
 }
 
+func (srw *sessionRW) recycleBytes(p []byte) {
+	srw.readBuffer = append(p, srw.readBuffer...)
+}
+
 type Session struct {
-	buf []byte
-	rw  *sessionRW
+	rw *sessionRW
 
 	streamID     uint32
 	streamIDLock *sync.Mutex
@@ -53,7 +57,6 @@ type Session struct {
 
 func NewSession(conn net.Conn, conf *Config) *Session {
 	return &Session{
-		buf:          []byte{},
 		rw:           newSessionRW(conn),
 		streamID:     0,
 		streamIDLock: &sync.Mutex{},
@@ -64,9 +67,42 @@ func NewSession(conn net.Conn, conf *Config) *Session {
 }
 
 func (s *Session) serv() {
+	for {
+	}
 }
 
 func (s *Session) recv() {
+	var (
+		twoBytes = make([]byte, 2, 2)
+		streamID uint32
+		// dataLen  uint16
+
+		err error
+	)
+
+	for {
+		_, err = io.ReadFull(s.rw, twoBytes)
+		if err == nil && twoBytes[0] == _PROTO_VER {
+			switch twoBytes[1] {
+			case _CMD_NEW_STREAM:
+				newEvent(_EVENT_NEW_SESSION, nil).sendTo(s.eventChannel)
+			case _CMD_NEW_STREAM_ACK:
+				if err = binary.Read(s.rw, binary.BigEndian, &streamID); err != nil {
+					newEvent(_EVENT_ERROR, err).sendTo(s.eventChannel)
+					goto end
+				}
+				newEvent(_EVENT_NEW_SESSION_ACK, streamID).sendTo(s.eventChannel)
+			}
+		} else if err != nil {
+			newEvent(_EVENT_ERROR, err).sendTo(s.eventChannel)
+			goto end
+		} else {
+			newEvent(_EVENT_ERROR, _ERR_PROTO_VERSION).sendTo(s.eventChannel)
+			goto end
+		}
+	}
+end:
+	s.terminal()
 }
 
 func (s *Session) heartbeat() {
