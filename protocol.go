@@ -19,3 +19,5 @@ const (
 
 	_CMD_UNKNOWN = 0xff
 )
+
+const _MIN_STREAM_ID = 1
