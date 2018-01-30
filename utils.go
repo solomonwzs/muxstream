@@ -4,6 +4,7 @@ import "errors"
 
 const (
 	_EVENT_FRAME_IN = iota
+	_EVENT_FRAME_OUT
 	_EVENT_RECV_ERROR
 	_EVENT_SEND_ERROR
 )
@@ -14,7 +15,10 @@ const (
 )
 
 var (
-	_ERR_PROTO_VERSION = errors.New("muxstream: error proto version")
+	ERR_PROTO_VERSION = errors.New("muxstream: error proto version")
+	ERR_UNKNOWN_CMD   = errors.New("muxstream: unknown command")
+	ERR_NOT_SERVER    = errors.New("muxstream: not a server conn")
+	ERR_NOT_CLIENT    = errors.New("muxstream: not a client conn")
 )
 
 var (
