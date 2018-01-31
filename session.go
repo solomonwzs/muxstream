@@ -5,28 +5,40 @@ import (
 	"io"
 )
 
+type ioRes struct {
+	n   int
+	err error
+}
+
+type sendFrameReq struct {
+	f  *frame
+	ch chan *ioRes
+}
+
 type Session struct {
 	rwc io.ReadWriteCloser
 
 	streamID uint32
 
 	conf    *Config
+	closed  bool
 	streams map[uint32]*Stream
 
-	eventChannel     chan *event
-	framesWaitToSend chan *frame
-	newStreams       chan *Stream
+	eventChannel chan *event
+	sendQueue    chan *sendFrameReq
+	newStreams   chan *Stream
 }
 
 func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
 	return &Session{
-		rwc:              rwc,
-		streamID:         _MIN_STREAM_ID,
-		conf:             conf,
-		streams:          make(map[uint32]*Stream),
-		eventChannel:     make(chan *event, _CHANNEL_SIZE),
-		framesWaitToSend: make(chan *frame, _CHANNEL_SIZE),
-		newStreams:       make(chan *Stream, _CHANNEL_SIZE),
+		rwc:          rwc,
+		streamID:     _MIN_STREAM_ID,
+		conf:         conf,
+		closed:       false,
+		streams:      make(map[uint32]*Stream),
+		eventChannel: make(chan *event, _CHANNEL_SIZE),
+		sendQueue:    make(chan *sendFrameReq, _CHANNEL_SIZE),
+		newStreams:   make(chan *Stream, _CHANNEL_SIZE),
 	}, nil
 }
 
@@ -43,24 +55,21 @@ func (s *Session) processFrame(f *frame) (err error) {
 			data:     nil,
 		}
 
-		s.streams[s.streamID] = &Stream{
-			streamID: s.streamID,
-			session:  s,
-		}
+		s.streams[s.streamID] = newStream(s.streamID, s)
 		s.streamID += 1
 
 		go func() {
-			s.framesWaitToSend <- resFrame
+			s.sendQueue <- &sendFrameReq{
+				f:  resFrame,
+				ch: nil,
+			}
 		}()
 	case _CMD_NEW_STREAM_ACK:
 		if s.conf.role != _ROLE_CLIENT {
 			return
 		}
 		if _, exist := s.streams[f.streamID]; !exist {
-			s.streams[f.streamID] = &Stream{
-				streamID: s.streamID,
-				session:  s,
-			}
+			s.streams[f.streamID] = newStream(f.streamID, s)
 		}
 	case _CMD_DATA:
 	case _CMD_HEARTBEAT:
@@ -82,7 +91,10 @@ func (s *Session) serv() {
 		case _EVENT_FRAME_OUT:
 			f := e.data.(*frame)
 			go func() {
-				s.framesWaitToSend <- f
+				s.sendQueue <- &sendFrameReq{
+					f:  f,
+					ch: nil,
+				}
 			}()
 		case _EVENT_RECV_ERROR:
 			goto end
@@ -152,17 +164,31 @@ func (s *Session) recvLoop() {
 }
 
 func (s *Session) sendLoop() {
-	for f := range s.framesWaitToSend {
-		data := f.encode().Bytes()
+	var (
+		n   int
+		err error
+	)
+
+	for msg := range s.sendQueue {
+		data := msg.f.encode().Bytes()
 		dataLen := len(data)
 		i := 0
 		for i < dataLen {
-			if n, err := s.rwc.Write(data[i:]); err != nil {
+			if n, err = s.rwc.Write(data[i:]); err != nil {
 				newEvent(_EVENT_SEND_ERROR, err).sendTo(s.eventChannel)
-				return
+				break
 			} else {
 				i += n
 			}
+		}
+
+		if msg.ch != nil {
+			go func() {
+				msg.ch <- &ioRes{n, err}
+			}()
+		}
+		if err != nil {
+			return
 		}
 	}
 }
@@ -171,8 +197,8 @@ func (s *Session) heartbeat() {
 }
 
 func (s *Session) terminal() {
+	s.closed = true
 	s.rwc.Close()
-	close(s.framesWaitToSend)
 }
 
 func (s *Session) AcceptStream() (stream *Stream, err error) {
