@@ -1,15 +1,21 @@
 package muxstream
 
 type Stream struct {
-	streamID uint32
-	session  *Session
+	streamID     uint32
+	session      *Session
+	readBuf      [][]byte
+	eventChannel chan *event
 }
 
 func newStream(streamID uint32, s *Session) *Stream {
-	return &Stream{
-		streamID: streamID,
-		session:  s,
+	stream := &Stream{
+		streamID:     streamID,
+		session:      s,
+		readBuf:      [][]byte{},
+		eventChannel: make(chan *event, _CHANNEL_SIZE),
 	}
+	go stream.serv()
+	return stream
 }
 
 func (stream *Stream) packDataFrame(p []byte) *frame {
@@ -19,6 +25,17 @@ func (stream *Stream) packDataFrame(p []byte) *frame {
 		streamID: stream.streamID,
 		data:     p,
 	}
+}
+
+func (stream *Stream) serv() {
+	for e := range stream.eventChannel {
+		switch e.typ {
+		case _EVENT_STREAM_CLOSE:
+			goto end
+		}
+	}
+end:
+	stream.terminal()
 }
 
 func (stream *Stream) Read(p []byte) (n int, err error) {
@@ -37,4 +54,7 @@ func (stream *Stream) Write(p []byte) (n int, err error) {
 
 func (stream *Stream) Close() (err error) {
 	return
+}
+
+func (stream *Stream) terminal() {
 }

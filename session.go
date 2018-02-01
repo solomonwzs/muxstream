@@ -85,10 +85,10 @@ func (s *Session) serv() {
 
 	for e := range s.eventChannel {
 		switch e.typ {
-		case _EVENT_FRAME_IN:
+		case _EVENT_SESSION_FRAME_IN:
 			f := e.data.(*frame)
 			s.processFrame(f)
-		case _EVENT_FRAME_OUT:
+		case _EVENT_SESSION_FRAME_OUT:
 			f := e.data.(*frame)
 			go func() {
 				s.sendQueue <- &sendFrameReq{
@@ -96,9 +96,11 @@ func (s *Session) serv() {
 					ch: nil,
 				}
 			}()
-		case _EVENT_RECV_ERROR:
+		case _EVENT_SESSION_RECV_ERROR:
 			goto end
-		case _EVENT_SEND_ERROR:
+		case _EVENT_SESSION_SEND_ERROR:
+			goto end
+		case _EVENT_SESSION_CLOSE:
 			goto end
 		}
 	}
@@ -155,10 +157,10 @@ func (s *Session) readFrame() (f *frame, err error) {
 func (s *Session) recvLoop() {
 	for {
 		if f, err := s.readFrame(); err != nil {
-			newEvent(_EVENT_RECV_ERROR, err).sendTo(s.eventChannel)
+			newEvent(_EVENT_SESSION_RECV_ERROR, err).sendTo(s.eventChannel)
 			return
 		} else {
-			newEvent(_EVENT_FRAME_IN, f).sendTo(s.eventChannel)
+			newEvent(_EVENT_SESSION_FRAME_IN, f).sendTo(s.eventChannel)
 		}
 	}
 }
@@ -169,22 +171,23 @@ func (s *Session) sendLoop() {
 		err error
 	)
 
-	for msg := range s.sendQueue {
-		data := msg.f.encode().Bytes()
+	for req := range s.sendQueue {
+		data := req.f.encode().Bytes()
 		dataLen := len(data)
 		i := 0
 		for i < dataLen {
 			if n, err = s.rwc.Write(data[i:]); err != nil {
-				newEvent(_EVENT_SEND_ERROR, err).sendTo(s.eventChannel)
+				newEvent(_EVENT_SESSION_SEND_ERROR, err).sendTo(
+					s.eventChannel)
 				break
 			} else {
 				i += n
 			}
 		}
 
-		if msg.ch != nil {
+		if req.ch != nil {
 			go func() {
-				msg.ch <- &ioRes{n, err}
+				req.ch <- &ioRes{n, err}
 			}()
 		}
 		if err != nil {
