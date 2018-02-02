@@ -11,8 +11,33 @@ type ioRes struct {
 }
 
 type sendFrameReq struct {
-	f  *frame
-	ch chan *ioRes
+	f      *frame
+	closed bool
+	ch     chan *ioRes
+}
+
+func newSendFrameReq(f *frame, waitForReturn bool) *sendFrameReq {
+	sReq := &sendFrameReq{f: f, closed: false, ch: nil}
+	if waitForReturn {
+		sReq.ch = make(chan *ioRes, 1)
+	}
+	return sReq
+}
+
+func (sReq *sendFrameReq) finish(n int, err error) error {
+	if sReq.closed {
+		return nil
+	}
+	sReq.closed = true
+	if sReq.ch != nil {
+		sReq.ch <- &ioRes{n, err}
+		close(sReq.ch)
+	}
+	return nil
+}
+
+func (sReq *sendFrameReq) Close() error {
+	return sReq.finish(0, ERR_SEND_WAS_INTERED)
 }
 
 type Session struct {
@@ -24,21 +49,23 @@ type Session struct {
 	closed  bool
 	streams map[uint32]*Stream
 
-	eventChannel chan *event
-	sendQueue    chan *sendFrameReq
-	newStreams   chan *Stream
+	eventChannel  chan *event
+	sendQueue     chan *sendFrameReq
+	newStreams    chan *Stream
+	closeSendLoop chan bool
 }
 
 func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
 	return &Session{
-		rwc:          rwc,
-		streamID:     _MIN_STREAM_ID,
-		conf:         conf,
-		closed:       false,
-		streams:      make(map[uint32]*Stream),
-		eventChannel: make(chan *event, _CHANNEL_SIZE),
-		sendQueue:    make(chan *sendFrameReq, _CHANNEL_SIZE),
-		newStreams:   make(chan *Stream, _CHANNEL_SIZE),
+		rwc:           rwc,
+		streamID:      _MIN_STREAM_ID,
+		conf:          conf,
+		closed:        false,
+		streams:       make(map[uint32]*Stream),
+		eventChannel:  make(chan *event, _CHANNEL_SIZE),
+		sendQueue:     make(chan *sendFrameReq, _CHANNEL_SIZE),
+		newStreams:    make(chan *Stream, _CHANNEL_SIZE),
+		closeSendLoop: make(chan bool),
 	}, nil
 }
 
@@ -58,12 +85,7 @@ func (s *Session) processFrame(f *frame) (err error) {
 		s.streams[s.streamID] = newStream(s.streamID, s)
 		s.streamID += 1
 
-		go func() {
-			s.sendQueue <- &sendFrameReq{
-				f:  resFrame,
-				ch: nil,
-			}
-		}()
+		go func() { s.sendQueue <- newSendFrameReq(resFrame, false) }()
 	case _CMD_NEW_STREAM_ACK:
 		if s.conf.role != _ROLE_CLIENT {
 			return
@@ -72,8 +94,15 @@ func (s *Session) processFrame(f *frame) (err error) {
 			s.streams[f.streamID] = newStream(f.streamID, s)
 		}
 	case _CMD_DATA:
+		if stream, exist := s.streams[f.streamID]; exist {
+			newEvent(_EVENT_STREAM_DATA_IN, f.data).sendTo(
+				stream.eventChannel)
+		}
 	case _CMD_HEARTBEAT:
 	case _CMD_STREAM_CLOSE:
+		if stream, exist := s.streams[f.streamID]; exist {
+			newEvent(_EVENT_STREAM_CLOSE, nil).sendTo(stream.eventChannel)
+		}
 	default:
 	}
 	return
@@ -90,18 +119,26 @@ func (s *Session) serv() {
 			s.processFrame(f)
 		case _EVENT_SESSION_FRAME_OUT:
 			f := e.data.(*frame)
-			go func() {
-				s.sendQueue <- &sendFrameReq{
-					f:  f,
-					ch: nil,
-				}
-			}()
+			go func() { s.sendQueue <- newSendFrameReq(f, false) }()
 		case _EVENT_SESSION_RECV_ERROR:
 			goto end
 		case _EVENT_SESSION_SEND_ERROR:
 			goto end
 		case _EVENT_SESSION_CLOSE:
 			goto end
+		case _EVENT_STREAM_TERMINAL:
+			streamID := e.data.(uint32)
+			if _, exist := s.streams[streamID]; exist {
+				delete(s.streams, streamID)
+			}
+
+			f := &frame{
+				version:  _PROTO_VER,
+				cmd:      _CMD_STREAM_CLOSE,
+				streamID: streamID,
+				data:     nil,
+			}
+			go func() { s.sendQueue <- newSendFrameReq(f, false) }()
 		}
 	}
 
@@ -171,26 +208,26 @@ func (s *Session) sendLoop() {
 		err error
 	)
 
-	for req := range s.sendQueue {
-		data := req.f.encode().Bytes()
-		dataLen := len(data)
-		i := 0
-		for i < dataLen {
-			if n, err = s.rwc.Write(data[i:]); err != nil {
-				newEvent(_EVENT_SESSION_SEND_ERROR, err).sendTo(
-					s.eventChannel)
-				break
-			} else {
-				i += n
+	for {
+		select {
+		case req := <-s.sendQueue:
+			data := req.f.encode().Bytes()
+			dataLen := len(data)
+			i := 0
+			for i < dataLen {
+				if n, err = s.rwc.Write(data[i:]); err != nil {
+					newEvent(_EVENT_SESSION_SEND_ERROR, err).sendTo(
+						s.eventChannel)
+					break
+				} else {
+					i += n
+				}
 			}
-		}
-
-		if req.ch != nil {
-			go func() {
-				req.ch <- &ioRes{n, err}
-			}()
-		}
-		if err != nil {
+			req.finish(n, err)
+			if err != nil {
+				return
+			}
+		case <-s.closeSendLoop:
 			return
 		}
 	}
@@ -201,6 +238,16 @@ func (s *Session) heartbeat() {
 
 func (s *Session) terminal() {
 	s.closed = true
+	s.closeSendLoop <- true
+
+	go waitForEventChannelClean(s.eventChannel)
+	go waitForSendQueueClean(s.sendQueue)
+
+	closeEvent := newEvent(_EVENT_STREAM_CLOSE, nil)
+	for _, stream := range s.streams {
+		closeEvent.sendTo(stream.eventChannel)
+	}
+
 	s.rwc.Close()
 }
 
