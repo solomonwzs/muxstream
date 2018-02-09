@@ -12,7 +12,7 @@ type Stream struct {
 	closed       bool
 	session      *Session
 	readBuf      [][]byte
-	readReqQueue []*readBufferReq
+	readReqQueue []*channelRequest
 	eventChannel chan *event
 }
 
@@ -22,7 +22,7 @@ func newStream(streamID uint32, s *Session) *Stream {
 		closed:       false,
 		session:      s,
 		readBuf:      [][]byte{},
-		readReqQueue: []*readBufferReq{},
+		readReqQueue: []*channelRequest{},
 		eventChannel: make(chan *event, _CHANNEL_SIZE),
 	}
 	go stream.serv()
@@ -51,49 +51,54 @@ func (stream *Stream) serv() {
 
 			for !stream.isReadReqQueueEmpty() && len(stream.readBuf) != 0 {
 				req := stream.readReqQueue[0]
-				stream.sendBufferToReq(req)
-				req.finish(nil)
+				n := stream.writeBufferToReq(req)
+				req.finish(n, nil)
 				stream.readReqQueue = stream.readReqQueue[1:]
 			}
 		case _EVENT_STREAM_READ_REQ:
-			req := e.data.(*readBufferReq)
+			req := e.data.(*channelRequest)
 			if stream.isReadReqQueueEmpty() {
-				stream.sendBufferToReq(req)
-				req.finish(nil)
+				n := stream.writeBufferToReq(req)
+				req.finish(n, nil)
 			} else {
 				stream.readReqQueue = append(stream.readReqQueue, req)
-				if req.timeDuration > 0 {
+				arg := req.arg.(*readBufferArg)
+				if arg.timeout > 0 {
 					go func() {
-						time.Sleep(req.timeDuration)
+						time.Sleep(arg.timeout)
 						newEvent(_EVENT_STREAM_READ_REQ_TIMEOUT, req).sendTo(
 							stream.eventChannel)
 					}()
 				}
 			}
 		case _EVENT_STREAM_READ_REQ_TIMEOUT:
-			req := e.data.(*readBufferReq)
-			req.finish(ERR_STREAM_IO_TIMEOUT)
+			req := e.data.(*channelRequest)
+			req.finish(0, ERR_STREAM_IO_TIMEOUT)
 		}
 	}
 end:
 	stream.terminal()
 }
 
-func (stream *Stream) sendBufferToReq(req *readBufferReq) {
+func (stream *Stream) writeBufferToReq(req *channelRequest) int {
 	i := 0
-	for i < len(stream.readBuf) && req.len > 0 {
+	arg := req.arg.(*readBufferArg)
+	pLen := len(arg.p)
+	n := 0
+	for i < len(stream.readBuf) && n < pLen {
 		bufLen := len(stream.readBuf[i])
-		if bufLen > req.len {
-			req.dataCh <- stream.readBuf[i][:req.len]
-			req.len = 0
+		if bufLen > pLen-n {
+			copy(arg.p[n:], stream.readBuf[i][:pLen-n])
+			n = pLen
 			break
 		} else {
-			req.dataCh <- stream.readBuf[i]
-			req.len -= bufLen
+			copy(arg.p[n:], stream.readBuf[i])
+			n += bufLen
 			i += 1
 		}
 	}
 	stream.readBuf = stream.readBuf[i:]
+	return n
 }
 
 func (stream *Stream) isReadReqQueueEmpty() bool {
@@ -106,44 +111,21 @@ func (stream *Stream) isReadReqQueueEmpty() bool {
 	return true
 }
 
-func (stream *Stream) newReadReq(len int) *readBufferReq {
-	return &readBufferReq{
-		len:          len,
-		closed:       false,
-		dataCh:       make(chan []byte, _CHANNEL_SIZE),
-		errCh:        make(chan error, 1),
-		timeDuration: -1,
-	}
+func (stream *Stream) newReadReq(p []byte) *channelRequest {
+	return newChannelRequest(&readBufferArg{p, -1}, true)
 }
 
-func (stream *Stream) Read(p []byte) (n int, err error) {
+func (stream *Stream) Read(p []byte) (int, error) {
 	if stream.session.closed {
 		return 0, ERR_CLOSED_SESSION
 	} else if stream.closed {
 		return 0, ERR_CLOSED_STREAM
 	}
 
-	pLen := len(p)
-	req := stream.newReadReq(pLen)
+	req := stream.newReadReq(p)
 	newEvent(_EVENT_STREAM_READ_REQ, req).sendTo(stream.eventChannel)
-
-	n = 0
-	err = nil
-	for {
-		select {
-		case buf, ok := <-req.dataCh:
-			if !ok {
-				goto end
-			}
-			copy(p[n:], buf)
-			n += len(buf)
-		case err = <-req.errCh:
-			goto end
-		}
-	}
-
-end:
-	return
+	n, err := req.bGetResponse()
+	return n.(int), err
 }
 
 func (stream *Stream) Write(p []byte) (n int, err error) {

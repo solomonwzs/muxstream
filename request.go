@@ -1,33 +1,5 @@
 package muxstream
 
-import "time"
-
-type readBufferReq struct {
-	len          int
-	closed       bool
-	dataCh       chan []byte
-	errCh        chan error
-	timeDuration time.Duration
-}
-
-func (req *readBufferReq) finish(err error) error {
-	if req.closed {
-		return nil
-	}
-
-	if err != nil {
-		req.errCh <- err
-	}
-	req.closed = true
-	close(req.dataCh)
-	close(req.errCh)
-	return nil
-}
-
-func (req *readBufferReq) Close() error {
-	return req.finish(ERR_STREAM_WAS_CLOSED)
-}
-
 type dataWithErr struct {
 	data interface{}
 	err  error
