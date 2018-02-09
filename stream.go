@@ -2,31 +2,9 @@ package muxstream
 
 import "time"
 
-type readBufferReq struct {
-	len          int
-	closed       bool
-	dataCh       chan []byte
-	errCh        chan error
-	timeDuration time.Duration
-}
-
-func (req *readBufferReq) finish(err error) error {
-	if req.closed {
-		return nil
-	}
-
-	if err != nil {
-		req.errCh <- err
-	}
-
-	req.closed = true
-	close(req.dataCh)
-	close(req.errCh)
-	return nil
-}
-
-func (req *readBufferReq) Close() error {
-	return req.finish(ERR_STREAM_WAS_CLOSED)
+type readBufferArg struct {
+	p       []byte
+	timeout time.Duration
 }
 
 type Stream struct {
@@ -188,14 +166,12 @@ func (stream *Stream) Write(p []byte) (n int, err error) {
 	return
 }
 
-func (stream *Stream) writeFrame(f *frame) (n int, err error) {
-	sReq := newSendFrameReq(f, true)
-	stream.session.sendQueue <- sReq
-	if res, ok := <-sReq.ch; ok {
-		return res.n, res.err
-	} else {
-		return 0, ERR_SEND_WAS_INTERED
-	}
+func (stream *Stream) writeFrame(f *frame) (int, error) {
+	req := newChannelRequest(f, true)
+	newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(
+		stream.session.sendQueue)
+	n, err := req.bGetResponse()
+	return n.(int), err
 }
 
 func (stream *Stream) Close() (err error) {
