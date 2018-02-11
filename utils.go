@@ -9,6 +9,8 @@ import (
 const (
 	_EVENT_SESSION_FRAME_IN = iota
 	_EVENT_SESSION_FRAME_OUT
+	_EVENT_SESSION_ACC_STREAM
+	_EVENT_SESSION_NEW_STREAM
 	_EVENT_SESSION_RECV_ERROR
 	_EVENT_SESSION_SEND_ERROR
 	_EVENT_SESSION_CLOSE
@@ -17,6 +19,7 @@ const (
 	_EVENT_SESSION_SL_CLOSE
 
 	_EVENT_STREAM_CLOSE
+	_EVENT_STREAM_CLOSE_WAIT
 	_EVENT_STREAM_TERMINAL
 	_EVENT_STREAM_DATA_IN
 	_EVENT_STREAM_READ_REQ
@@ -31,6 +34,11 @@ const (
 var (
 	_CHANNEL_TIME_WAIT = 16 * time.Second
 )
+
+type closer interface {
+	io.Closer
+	IsClosed() bool
+}
 
 type timeoutError struct {
 	message string
@@ -76,15 +84,29 @@ func (e *event) sendTo(ch chan *event) {
 	go func() { ch <- e }()
 }
 
+func (e *event) sendToAfter(ch chan *event, d time.Duration) {
+	go func() {
+		time.Sleep(d)
+		ch <- e
+	}()
+}
+
+func (e *event) Close() error {
+	if e.data == nil {
+		return nil
+	} else if c, ok := e.data.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
 func waitForEventChannelClean(ch chan *event) {
 	end := time.After(_CHANNEL_TIME_WAIT)
 	for {
 		select {
 		case e, ok := <-ch:
-			if ok {
-				if c, ok := e.data.(io.Closer); ok {
-					c.Close()
-				}
+			if ok && e != nil {
+				e.Close()
 			} else {
 				return
 			}
@@ -92,4 +114,50 @@ func waitForEventChannelClean(ch chan *event) {
 			return
 		}
 	}
+}
+
+type closerQueue struct {
+	queue []closer
+}
+
+func newCloserQueue() *closerQueue {
+	return &closerQueue{
+		queue: []closer{},
+	}
+}
+
+func (q *closerQueue) isEmpty() bool {
+	for i, req := range q.queue {
+		if !req.IsClosed() {
+			q.queue = q.queue[i:]
+			return false
+		}
+	}
+
+	l := len(q.queue)
+	if l != 0 {
+		q.queue = q.queue[l:]
+	}
+	return true
+}
+
+func (q *closerQueue) pop() closer {
+	if len(q.queue) == 0 {
+		return nil
+	} else {
+		req := q.queue[0]
+		q.queue = q.queue[1:]
+		return req
+	}
+}
+
+func (q *closerQueue) push(req closer) {
+	q.queue = append(q.queue, req)
+}
+
+func (q *closerQueue) Close() error {
+	for _, req := range q.queue {
+		req.Close()
+	}
+	return nil
 }

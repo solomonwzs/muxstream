@@ -35,6 +35,10 @@ func (req *channelRequest) finish(res interface{}, err error) error {
 	return nil
 }
 
+func (req *channelRequest) IsClosed() bool {
+	return req.closed
+}
+
 func (req *channelRequest) Close() error {
 	return req.finish(nil, ERR_CH_REQ_WAS_CLOSED)
 }

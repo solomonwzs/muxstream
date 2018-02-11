@@ -20,4 +20,7 @@ const (
 	_CMD_UNKNOWN = 0xff
 )
 
-const _MIN_STREAM_ID = 1
+const (
+	_MIN_STREAM_ID = 1
+	_HEADER_SIZE   = 8
+)

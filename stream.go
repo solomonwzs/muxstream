@@ -1,6 +1,8 @@
 package muxstream
 
-import "time"
+import (
+	"time"
+)
 
 type readBufferArg struct {
 	p       []byte
@@ -12,7 +14,7 @@ type Stream struct {
 	closed       bool
 	session      *Session
 	readBuf      [][]byte
-	readReqQueue []*channelRequest
+	readReqQueue *closerQueue
 	eventChannel chan *event
 }
 
@@ -22,11 +24,15 @@ func newStream(streamID uint32, s *Session) *Stream {
 		closed:       false,
 		session:      s,
 		readBuf:      [][]byte{},
-		readReqQueue: []*channelRequest{},
+		readReqQueue: newCloserQueue(),
 		eventChannel: make(chan *event, _CHANNEL_SIZE),
 	}
 	go stream.serv()
 	return stream
+}
+
+func (stream *Stream) IsClosed() bool {
+	return stream.closed
 }
 
 func (stream *Stream) packDataFrame(p []byte) *frame {
@@ -43,25 +49,32 @@ func (stream *Stream) serv() {
 		switch e.typ {
 		case _EVENT_STREAM_CLOSE:
 			goto end
+		case _EVENT_STREAM_CLOSE_WAIT:
+			stream.closed = true
+			if len(stream.readBuf) == 0 {
+				goto end
+			} else {
+				newEvent(_EVENT_STREAM_CLOSE_WAIT, nil).sendToAfter(
+					stream.eventChannel, 1*time.Second)
+			}
 		case _EVENT_STREAM_DATA_IN:
 			data := e.data.([]byte)
 			if len(data) != 0 {
 				stream.readBuf = append(stream.readBuf, data)
 			}
 
-			for !stream.isReadReqQueueEmpty() && len(stream.readBuf) != 0 {
-				req := stream.readReqQueue[0]
+			for !stream.readReqQueue.isEmpty() && len(stream.readBuf) != 0 {
+				req := stream.readReqQueue.pop().(*channelRequest)
 				n := stream.writeBufferToReq(req)
 				req.finish(n, nil)
-				stream.readReqQueue = stream.readReqQueue[1:]
 			}
 		case _EVENT_STREAM_READ_REQ:
 			req := e.data.(*channelRequest)
-			if stream.isReadReqQueueEmpty() {
+			if stream.readReqQueue.isEmpty() && len(stream.readBuf) != 0 {
 				n := stream.writeBufferToReq(req)
 				req.finish(n, nil)
 			} else {
-				stream.readReqQueue = append(stream.readReqQueue, req)
+				stream.readReqQueue.push(req)
 				arg := req.arg.(*readBufferArg)
 				if arg.timeout > 0 {
 					go func() {
@@ -101,16 +114,6 @@ func (stream *Stream) writeBufferToReq(req *channelRequest) int {
 	return n
 }
 
-func (stream *Stream) isReadReqQueueEmpty() bool {
-	for i, req := range stream.readReqQueue {
-		if req.closed {
-			stream.readReqQueue = stream.readReqQueue[i:]
-			return false
-		}
-	}
-	return true
-}
-
 func (stream *Stream) newReadReq(p []byte) *channelRequest {
 	return newChannelRequest(&readBufferArg{p, -1}, true)
 }
@@ -118,14 +121,18 @@ func (stream *Stream) newReadReq(p []byte) *channelRequest {
 func (stream *Stream) Read(p []byte) (int, error) {
 	if stream.session.closed {
 		return 0, ERR_CLOSED_SESSION
-	} else if stream.closed {
+	} else if stream.closed && len(stream.readBuf) == 0 {
 		return 0, ERR_CLOSED_STREAM
 	}
 
 	req := stream.newReadReq(p)
 	newEvent(_EVENT_STREAM_READ_REQ, req).sendTo(stream.eventChannel)
-	n, err := req.bGetResponse()
-	return n.(int), err
+	n0, err := req.bGetResponse()
+	n := 0
+	if n0 != nil {
+		n = n0.(int)
+	}
+	return n, err
 }
 
 func (stream *Stream) Write(p []byte) (n int, err error) {
@@ -152,8 +159,12 @@ func (stream *Stream) writeFrame(f *frame) (int, error) {
 	req := newChannelRequest(f, true)
 	newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(
 		stream.session.sendQueue)
-	n, err := req.bGetResponse()
-	return n.(int), err
+	n0, err := req.bGetResponse()
+	n := 0
+	if n0 != nil {
+		n = n0.(int)
+	}
+	return n, err
 }
 
 func (stream *Stream) Close() (err error) {
@@ -168,7 +179,5 @@ func (stream *Stream) terminal() {
 
 	go waitForEventChannelClean(stream.eventChannel)
 
-	for _, req := range stream.readReqQueue {
-		req.Close()
-	}
+	stream.readReqQueue.Close()
 }
