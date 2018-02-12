@@ -28,6 +28,7 @@ const (
 
 const (
 	_MAX_BUFFER_SIZE = 0xffff
+	_MAX_STREAMS_NUM = 0xffffffff
 	_CHANNEL_SIZE    = 100
 )
 
@@ -58,9 +59,11 @@ var (
 	ERR_CLOSED_STREAM      = errors.New("muxstream: use of a closed stream")
 	ERR_CH_REQ_WAS_CLOSED  = errors.New("muxstream: channel request was closed")
 	ERR_CH_RES_NIL         = errors.New("muxstream: channel response was nil")
+	ERR_CH_REQ_TIMEOUT     = errors.New("muxstream: channel request timeout")
 	ERR_SEND_WAS_INTERED   = errors.New("muxstream: send was interrupted")
 	ERR_STREAM_WAS_CLOSED  = errors.New("muxstream: stream was closed")
 	ERR_SESSION_WAS_CLOSED = errors.New("muxstream: session was closed")
+	ERR_STREAMS_TOO_MUCH   = errors.New("muxstream: streams too much")
 	ERR_STREAM_IO_TIMEOUT  = newTimeoutError("muxstream: stream i/o timeout")
 )
 

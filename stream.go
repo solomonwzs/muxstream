@@ -1,6 +1,8 @@
 package muxstream
 
 import (
+	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -10,12 +12,14 @@ type readBufferArg struct {
 }
 
 type Stream struct {
-	streamID     uint32
-	closed       bool
-	session      *Session
-	readBuf      [][]byte
-	readReqQueue *closerQueue
-	eventChannel chan *event
+	streamID      uint32
+	closed        bool
+	session       *Session
+	readBuf       [][]byte
+	readReqQueue  *closerQueue
+	eventChannel  chan *event
+	readDeadline  atomic.Value
+	writeDeadline atomic.Value
 }
 
 func newStream(streamID uint32, s *Session) *Stream {
@@ -27,6 +31,8 @@ func newStream(streamID uint32, s *Session) *Stream {
 		readReqQueue: newCloserQueue(),
 		eventChannel: make(chan *event, _CHANNEL_SIZE),
 	}
+	stream.readDeadline.Store(time.Time{})
+	stream.writeDeadline.Store(time.Time{})
 	go stream.serv()
 	return stream
 }
@@ -114,8 +120,15 @@ func (stream *Stream) writeBufferToReq(req *channelRequest) int {
 	return n
 }
 
-func (stream *Stream) newReadReq(p []byte) *channelRequest {
-	return newChannelRequest(&readBufferArg{p, -1}, true)
+func (stream *Stream) newReadReq(p []byte) (*channelRequest, error) {
+	var timeout time.Duration = 0
+	if t, ok := stream.readDeadline.Load().(time.Time); ok && !t.IsZero() {
+		timeout = time.Until(t)
+		if timeout <= 0 {
+			return nil, ERR_STREAM_IO_TIMEOUT
+		}
+	}
+	return newChannelRequest(&readBufferArg{p, timeout}, true), nil
 }
 
 func (stream *Stream) Read(p []byte) (int, error) {
@@ -125,9 +138,12 @@ func (stream *Stream) Read(p []byte) (int, error) {
 		return 0, ERR_CLOSED_STREAM
 	}
 
-	req := stream.newReadReq(p)
+	req, err := stream.newReadReq(p)
+	if err != nil {
+		return 0, err
+	}
 	newEvent(_EVENT_STREAM_READ_REQ, req).sendTo(stream.eventChannel)
-	n0, err := req.bGetResponse()
+	n0, err := req.bGetResponse(0)
 	n := 0
 	if n0 != nil {
 		n = n0.(int)
@@ -156,10 +172,18 @@ func (stream *Stream) Write(p []byte) (n int, err error) {
 }
 
 func (stream *Stream) writeFrame(f *frame) (int, error) {
+	var timeout time.Duration = 0
+	if t, ok := stream.readDeadline.Load().(time.Time); ok && !t.IsZero() {
+		timeout = time.Until(t)
+		if timeout <= 0 {
+			return 0, ERR_STREAM_IO_TIMEOUT
+		}
+	}
+
 	req := newChannelRequest(f, true)
 	newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(
 		stream.session.sendQueue)
-	n0, err := req.bGetResponse()
+	n0, err := req.bGetResponse(timeout)
 	n := 0
 	if n0 != nil {
 		n = n0.(int)
@@ -170,6 +194,34 @@ func (stream *Stream) writeFrame(f *frame) (int, error) {
 func (stream *Stream) Close() (err error) {
 	newEvent(_EVENT_STREAM_CLOSE, nil).sendTo(stream.eventChannel)
 	return
+}
+
+func (stream *Stream) LocalAddr() net.Addr {
+	return stream.session.LocalAddr()
+}
+
+func (stream *Stream) RemoteAddr() net.Addr {
+	return stream.session.RemoteAddr()
+}
+
+func (stream *Stream) SetReadDeadline(t time.Time) error {
+	stream.readDeadline.Store(t)
+	return nil
+}
+
+func (stream *Stream) SetWriteDeadline(t time.Time) error {
+	stream.writeDeadline.Store(t)
+	return nil
+}
+
+func (stream *Stream) SetDeadline(t time.Time) error {
+	if err := stream.SetReadDeadline(t); err != nil {
+		return err
+	}
+	if err := stream.SetWriteDeadline(t); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (stream *Stream) terminal() {

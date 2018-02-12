@@ -1,5 +1,7 @@
 package muxstream
 
+import "time"
+
 type dataWithErr struct {
 	data interface{}
 	err  error
@@ -43,14 +45,24 @@ func (req *channelRequest) Close() error {
 	return req.finish(nil, ERR_CH_REQ_WAS_CLOSED)
 }
 
-func (req *channelRequest) bGetResponse() (interface{}, error) {
-	if d, ok := <-req.responseCh; ok {
-		if d == nil {
-			return nil, ERR_CH_RES_NIL
+func (req *channelRequest) bGetResponse(timeout time.Duration) (interface{}, error) {
+	var deadline <-chan time.Time = nil
+	if timeout != 0 {
+		deadline = time.After(timeout)
+	}
+
+	select {
+	case d, ok := <-req.responseCh:
+		if ok {
+			if d == nil {
+				return nil, ERR_CH_RES_NIL
+			} else {
+				return d.data, d.err
+			}
 		} else {
-			return d.data, d.err
+			return nil, ERR_CH_REQ_WAS_CLOSED
 		}
-	} else {
-		return nil, ERR_CH_REQ_WAS_CLOSED
+	case <-deadline:
+		return nil, ERR_CH_REQ_TIMEOUT
 	}
 }

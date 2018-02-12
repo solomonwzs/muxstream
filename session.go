@@ -3,6 +3,7 @@ package muxstream
 import (
 	"encoding/binary"
 	"io"
+	"net"
 )
 
 type streamManager struct {
@@ -49,18 +50,23 @@ func (m *streamManager) del(id uint32) {
 	}
 }
 
+func (m *streamManager) size() int {
+	return len(m.streams)
+}
+
 func (m *streamManager) Close() error {
 	closeEvent := newEvent(_EVENT_STREAM_CLOSE, nil)
 	for _, stream := range m.streams {
 		closeEvent.sendTo(stream.eventChannel)
 	}
+	m.reqQueue.Close()
 	return nil
 }
 
 type Session struct {
 	rwc io.ReadWriteCloser
 
-	streamID uint32
+	nextStreamID uint32
 
 	conf    *Config
 	closed  bool
@@ -76,7 +82,7 @@ type Session struct {
 func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
 	s := &Session{
 		rwc:            rwc,
-		streamID:       _MIN_STREAM_ID,
+		nextStreamID:   _MIN_STREAM_ID,
 		conf:           conf,
 		closed:         false,
 		streamM:        newStreamManager(),
@@ -89,21 +95,31 @@ func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
 	return s, nil
 }
 
+func (s *Session) getNextStreamID() uint32 {
+	id := s.nextStreamID
+	for {
+		s.nextStreamID += 1
+		if _, exist := s.streamM.get(s.nextStreamID); !exist {
+			break
+		}
+	}
+	return id
+}
+
 func (s *Session) processFrame(f *frame) (err error) {
 	switch f.cmd {
 	case _CMD_NEW_STREAM:
 		if s.conf.role != _ROLE_SERVER {
 			return
 		}
+		streamID := s.getNextStreamID()
 		resFrame := &frame{
 			version:  _PROTO_VER,
 			cmd:      _CMD_NEW_STREAM_ACK,
-			streamID: s.streamID,
+			streamID: streamID,
 			data:     nil,
 		}
-
-		s.streamM.streamIn(newStream(s.streamID, s))
-		s.streamID += 1
+		s.streamM.streamIn(newStream(streamID, s))
 
 		req := newChannelRequest(resFrame, false)
 		newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(s.sendQueue)
@@ -293,7 +309,7 @@ func (s *Session) AcceptStream() (*Stream, error) {
 
 	req := newChannelRequest(nil, true)
 	newEvent(_EVENT_SESSION_ACC_STREAM, req).sendTo(s.eventChannel)
-	stream, err := req.bGetResponse()
+	stream, err := req.bGetResponse(0)
 	if err != nil {
 		return nil, err
 	} else {
@@ -306,13 +322,33 @@ func (s *Session) OpenStream() (*Stream, error) {
 		return nil, ERR_NOT_CLIENT
 	}
 
+	if s.streamM.size() > _MAX_STREAMS_NUM {
+		return nil, ERR_STREAMS_TOO_MUCH
+	}
+
 	req := newChannelRequest(nil, true)
 	newEvent(_EVENT_SESSION_NEW_STREAM, req).sendTo(s.eventChannel)
-	stream, err := req.bGetResponse()
+	stream, err := req.bGetResponse(0)
 	if err != nil {
 		return nil, err
 	} else {
 		return stream.(*Stream), nil
+	}
+}
+
+func (s *Session) LocalAddr() net.Addr {
+	if conn, ok := s.rwc.(net.Conn); ok {
+		return conn.LocalAddr()
+	} else {
+		return nil
+	}
+}
+
+func (s *Session) RemoteAddr() net.Addr {
+	if conn, ok := s.rwc.(net.Conn); ok {
+		return conn.RemoteAddr()
+	} else {
+		return nil
 	}
 }
 
