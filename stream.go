@@ -60,7 +60,7 @@ func (stream *Stream) serv() {
 			if len(stream.readBuf) == 0 {
 				goto end
 			} else {
-				newEvent(_EVENT_STREAM_CLOSE_WAIT, nil).sendToAfter(
+				go newEvent(_EVENT_STREAM_CLOSE_WAIT, nil).sendToAfter(
 					stream.eventChannel, 1*time.Second)
 			}
 		case _EVENT_STREAM_DATA_IN:
@@ -173,7 +173,8 @@ func (stream *Stream) Write(p []byte) (n int, err error) {
 
 func (stream *Stream) writeFrame(f *frame) (int, error) {
 	var timeout time.Duration = 0
-	if t, ok := stream.readDeadline.Load().(time.Time); ok && !t.IsZero() {
+	t, ok := stream.writeDeadline.Load().(time.Time)
+	if ok && !t.IsZero() {
 		timeout = time.Until(t)
 		if timeout <= 0 {
 			return 0, ERR_STREAM_IO_TIMEOUT
@@ -187,6 +188,9 @@ func (stream *Stream) writeFrame(f *frame) (int, error) {
 	n := 0
 	if n0 != nil {
 		n = n0.(int)
+	}
+	if err == ERR_CH_REQ_TIMEOUT {
+		err = ERR_STREAM_IO_TIMEOUT
 	}
 	return n, err
 }

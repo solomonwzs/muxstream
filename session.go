@@ -72,24 +72,19 @@ type Session struct {
 	closed  bool
 	streamM *streamManager
 
-	accStreamQueue []*channelRequest
-	newStreamQueue []*channelRequest
-
 	eventChannel chan *event
 	sendQueue    chan *event
 }
 
 func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
 	s := &Session{
-		rwc:            rwc,
-		nextStreamID:   _MIN_STREAM_ID,
-		conf:           conf,
-		closed:         false,
-		streamM:        newStreamManager(),
-		accStreamQueue: []*channelRequest{},
-		newStreamQueue: []*channelRequest{},
-		eventChannel:   make(chan *event, _CHANNEL_SIZE),
-		sendQueue:      make(chan *event, _CHANNEL_SIZE),
+		rwc:          rwc,
+		nextStreamID: _MIN_STREAM_ID,
+		conf:         conf,
+		closed:       false,
+		streamM:      newStreamManager(),
+		eventChannel: make(chan *event, _CHANNEL_SIZE),
+		sendQueue:    make(chan *event, _CHANNEL_SIZE),
 	}
 	go s.serv()
 	return s, nil
@@ -122,7 +117,7 @@ func (s *Session) processFrame(f *frame) (err error) {
 		s.streamM.streamIn(newStream(streamID, s))
 
 		req := newChannelRequest(resFrame, false)
-		newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(s.sendQueue)
+		go newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(s.sendQueue)
 	case _CMD_NEW_STREAM_ACK:
 		if s.conf.role != _ROLE_CLIENT {
 			return
@@ -156,7 +151,10 @@ func (s *Session) serv() {
 			f := e.data.(*frame)
 			s.processFrame(f)
 		case _EVENT_SESSION_RECV_ERROR:
-			goto end
+			err := e.data.(error)
+			if err != ERR_PROTO_VERSION && err != ERR_UNKNOWN_CMD {
+				goto end
+			}
 		case _EVENT_SESSION_SEND_ERROR:
 			goto end
 		case _EVENT_SESSION_CLOSE:
@@ -242,7 +240,9 @@ func (s *Session) recvLoop() {
 	for {
 		if f, err := s.readFrame(); err != nil {
 			newEvent(_EVENT_SESSION_RECV_ERROR, err).sendTo(s.eventChannel)
-			return
+			if err != ERR_PROTO_VERSION && err != ERR_UNKNOWN_CMD {
+				break
+			}
 		} else {
 			newEvent(_EVENT_SESSION_FRAME_IN, f).sendTo(s.eventChannel)
 		}
@@ -290,13 +290,6 @@ func (s *Session) terminal() {
 
 	go waitForEventChannelClean(s.eventChannel)
 	go waitForEventChannelClean(s.sendQueue)
-
-	for _, req := range s.accStreamQueue {
-		req.Close()
-	}
-	for _, req := range s.newStreamQueue {
-		req.Close()
-	}
 
 	s.streamM.Close()
 	s.rwc.Close()

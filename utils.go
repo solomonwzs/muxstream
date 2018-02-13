@@ -12,14 +12,14 @@ const (
 	_EVENT_SESSION_ACC_STREAM
 	_EVENT_SESSION_NEW_STREAM
 	_EVENT_SESSION_RECV_ERROR
-	_EVENT_SESSION_SEND_ERROR
+	_EVENT_SESSION_SEND_ERROR //5
 	_EVENT_SESSION_CLOSE
 
 	_EVENT_SESSION_SL_SEND_FRAME
 	_EVENT_SESSION_SL_CLOSE
 
 	_EVENT_STREAM_CLOSE
-	_EVENT_STREAM_CLOSE_WAIT
+	_EVENT_STREAM_CLOSE_WAIT //10
 	_EVENT_STREAM_TERMINAL
 	_EVENT_STREAM_DATA_IN
 	_EVENT_STREAM_READ_REQ
@@ -29,7 +29,7 @@ const (
 const (
 	_MAX_BUFFER_SIZE = 0xffff
 	_MAX_STREAMS_NUM = 0xffffffff
-	_CHANNEL_SIZE    = 100
+	_CHANNEL_SIZE    = 0xff
 )
 
 var (
@@ -84,14 +84,12 @@ func newEvent(typ uint8, data interface{}) *event {
 }
 
 func (e *event) sendTo(ch chan *event) {
-	go func() { ch <- e }()
+	ch <- e
 }
 
 func (e *event) sendToAfter(ch chan *event, d time.Duration) {
-	go func() {
-		time.Sleep(d)
-		ch <- e
-	}()
+	time.Sleep(d)
+	ch <- e
 }
 
 func (e *event) Close() error {

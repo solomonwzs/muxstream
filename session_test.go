@@ -1,18 +1,48 @@
 package muxstream
 
 import (
+	"bytes"
+	crand "crypto/rand"
 	"fmt"
+	"io"
+	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
-type ServerSession interface {
-	AcceptStream() (net.Conn, error)
+type slowNetConn struct {
+	net.Conn
+	delay time.Duration
 }
 
-type ClientSession interface {
-	OpenStream() (net.Conn, error)
+func (conn *slowNetConn) Read(p []byte) (int, error) {
+	time.Sleep(conn.delay)
+	return conn.Conn.Read(p)
+}
+
+func (conn *slowNetConn) Write(p []byte) (int, error) {
+	time.Sleep(conn.delay)
+	return conn.Conn.Write(p)
+}
+
+func drawProgressBar(n, m int, len int) {
+	nLen := n * len / m
+	buf := new(bytes.Buffer)
+	buf.WriteByte('[')
+	for i := 0; i < nLen; i++ {
+		buf.WriteByte('#')
+	}
+	for i := 0; i < len-nLen; i++ {
+		buf.WriteByte('-')
+	}
+	buf.WriteByte(']')
+	buf.WriteString(fmt.Sprintf(" %.2f%%\r", float64(n)/float64(m)*100))
+
+	os.Stdout.Write(buf.Bytes())
+	os.Stdout.Sync()
 }
 
 func setupTcpConn(tb testing.TB) (sConn, cConn net.Conn) {
@@ -78,47 +108,77 @@ func echoServer(tb testing.TB, stream net.Conn) {
 	}
 }
 
+func simpleServer(tb testing.TB, session *Session) {
+	for {
+		if stream, err := session.AcceptStream(); err == nil {
+			go echoServer(tb, stream)
+		} else {
+			if err != ERR_CH_REQ_WAS_CLOSED &&
+				err != ERR_SESSION_WAS_CLOSED {
+				tb.Error(err)
+			}
+			return
+		}
+	}
+}
+
+func TestBasic(t *testing.T) {
+	server, client := setupSession(t,
+		(&Config{}).SetServer(), (&Config{}).SetClient())
+	ss, cs := setupStream(t, server, client)
+
+	p0 := []byte("0123456789")
+	if _, err := cs.Write(p0[:5]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.Write(p0[5:]); err != nil {
+		t.Fatal(err)
+	}
+	cs.Close()
+	time.Sleep(10 * time.Millisecond)
+
+	p1 := make([]byte, 1024, 1024)
+	if n, err := ss.Read(p1); err != nil {
+		t.Fatal(err)
+	} else if string(p0) != string(p1[:n]) {
+		t.Fatal("error response")
+	}
+
+	server.Close()
+	client.Close()
+}
+
 func TestEcho(t *testing.T) {
 	server, client := setupSession(t,
 		(&Config{}).SetServer(), (&Config{}).SetClient())
+	ss, cs := setupStream(t, server, client)
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-
-		stream, err := server.AcceptStream()
-		if err != nil {
-			t.Fatal(err)
-		}
-		echoServer(t, stream)
-
-		stream.Close()
+		echoServer(t, ss)
+		ss.Close()
 		server.Close()
 	}()
 
 	go func() {
 		defer wg.Done()
 
-		stream, err := client.OpenStream()
-		if err != nil {
-			t.Fatal(err)
-		}
-
 		p := make([]byte, 1024, 1024)
 		for i := 0; i < 10; i++ {
 			msg := fmt.Sprintf("%d: hello world!", i)
-			if _, err := stream.Write([]byte(msg)); err != nil {
+			if _, err := cs.Write([]byte(msg)); err != nil {
 				t.Fatal("client:", err)
-			} else if n, err := stream.Read(p); err != nil {
+			} else if n, err := cs.Read(p); err != nil {
 				t.Fatal(err)
 			} else if string(p[:n]) != msg {
 				t.Fatalf("client: error, expect: %s, revice: %s",
 					msg, string(p[:n]))
 			}
 		}
-
-		stream.Close()
+		cs.Close()
 		client.Close()
 	}()
 
@@ -128,8 +188,25 @@ func TestEcho(t *testing.T) {
 func TestParallel(t *testing.T) {
 	server, client := setupSession(t,
 		(&Config{}).SetServer(), (&Config{}).SetClient())
-	pnum := 100
-	rnum := 100
+	pnum := 300
+	rnum := 300
+
+	var wgCount sync.WaitGroup
+	countCh := make(chan bool, pnum)
+	wgCount.Add(1)
+	go func() {
+		defer wgCount.Done()
+		n := 0
+		m := pnum * rnum / 100
+		for range countCh {
+			n += 1
+			if n%m == 0 {
+				drawProgressBar(n, pnum*rnum, 60)
+			}
+		}
+		drawProgressBar(1, 1, 60)
+		fmt.Printf("\n")
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -177,6 +254,7 @@ func TestParallel(t *testing.T) {
 						t.Fatal("client: error, expect: %s, revice: %s",
 							msg, string(p[:n]))
 					}
+					countCh <- true
 				}
 				stream.Close()
 			}(i)
@@ -186,6 +264,77 @@ func TestParallel(t *testing.T) {
 	wg.Wait()
 	server.Close()
 	client.Close()
+
+	close(countCh)
+	wgCount.Wait()
+}
+
+func TestRandomData(t *testing.T) {
+	server, client := setupSession(t,
+		(&Config{}).SetServer(), (&Config{}).SetClient())
+	go simpleServer(t, server)
+
+	for i := 0; i < 100; i++ {
+		rnd := make([]byte, rand.Uint32()%1024)
+		io.ReadFull(crand.Reader, rnd)
+		client.rwc.Write(rnd)
+	}
+	client.Close()
+	server.Close()
+}
+
+func TestReadDeadline(t *testing.T) {
+	server, client := setupSession(t,
+		(&Config{}).SetServer(), (&Config{}).SetClient())
+	go simpleServer(t, server)
+
+	var wg sync.WaitGroup
+	n := 100
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			stream, err := client.OpenStream()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := make([]byte, 16)
+			stream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			if _, err = stream.Read(p); err != ERR_STREAM_IO_TIMEOUT {
+				t.Fatal("set read deadline fail")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestWriteDeadline(t *testing.T) {
+	delay := 40 * time.Millisecond
+	sConn, cConn0 := setupTcpConn(t)
+	cConn := &slowNetConn{cConn0, 2 * delay}
+	server, _ := NewSession(sConn, (&Config{}).SetServer())
+	client, _ := NewSession(cConn, (&Config{}).SetClient())
+	go simpleServer(t, server)
+
+	var wg sync.WaitGroup
+	n := 10
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			stream, err := client.OpenStream()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := make([]byte, 16)
+			stream.SetWriteDeadline(time.Now().Add(delay))
+			if _, err = stream.Write(p); err != ERR_STREAM_IO_TIMEOUT {
+				fmt.Println(err)
+				t.Fatal("set write deadline fail")
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func readAll(tb testing.TB, conn net.Conn, buf []byte, size int) (
@@ -232,6 +381,8 @@ func benchmarkMuxSpeed(b *testing.B, size int) {
 	for i := 0; i < b.N; i++ {
 		simpleRW(b, ss, cs, buf0, buf1)
 	}
+	server.Close()
+	client.Close()
 }
 
 func benchmarkTcpSpeed(b *testing.B, size int) {
@@ -241,6 +392,8 @@ func benchmarkTcpSpeed(b *testing.B, size int) {
 	for i := 0; i < b.N; i++ {
 		simpleRW(b, sConn, cConn, buf0, buf1)
 	}
+	sConn.Close()
+	cConn.Close()
 }
 
 func BenchmarkMuxSpeed32K(b *testing.B) {

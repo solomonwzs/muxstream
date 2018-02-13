@@ -1,6 +1,8 @@
 package muxstream
 
-import "time"
+import (
+	"time"
+)
 
 type dataWithErr struct {
 	data interface{}
