@@ -3,6 +3,7 @@ package muxstream
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 )
 
 type frame struct {
@@ -40,7 +41,7 @@ func newDataFrames(streamID uint32, data []byte) []*frame {
 	return fs
 }
 
-func (f *frame) encode() (buf *bytes.Buffer) {
+func (f *frame) header() (buf *bytes.Buffer) {
 	buf = new(bytes.Buffer)
 	buf.Write([]byte{f.version, f.cmd})
 
@@ -54,7 +55,25 @@ func (f *frame) encode() (buf *bytes.Buffer) {
 	}
 
 	binary.Write(buf, binary.BigEndian, uint16(len(f.data)))
-	buf.Write(f.data)
-
 	return
+}
+
+func (f *frame) WriteTo(w io.Writer) (n int64, err error) {
+	header := f.header().Bytes()
+
+	if n0, err0 := writeAll(w, header); err != nil {
+		return int64(n0), err0
+	} else {
+		n += int64(n0)
+	}
+
+	if len(f.data) == 0 {
+		return
+	}
+
+	if n0, err0 := writeAll(w, f.data); err0 != nil {
+		return n + int64(n0), err0
+	} else {
+		return n + int64(n0), nil
+	}
 }

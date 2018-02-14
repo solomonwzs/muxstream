@@ -10,8 +10,8 @@ type dataWithErr struct {
 }
 
 type channelRequest struct {
+	flagClosed
 	arg        interface{}
-	closed     bool
 	responseCh chan *dataWithErr
 }
 
@@ -21,17 +21,17 @@ func newChannelRequest(arg interface{}, waitForReturn bool) *channelRequest {
 		ch = make(chan *dataWithErr, 1)
 	}
 	return &channelRequest{
+		flagClosed: false,
 		arg:        arg,
-		closed:     false,
 		responseCh: ch,
 	}
 }
 
 func (req *channelRequest) finish(res interface{}, err error) error {
-	if req.closed {
+	if req.flagClosed {
 		return nil
 	}
-	req.closed = true
+	req.flagClosed = true
 	if req.responseCh != nil {
 		req.responseCh <- &dataWithErr{res, err}
 		close(req.responseCh)
@@ -39,15 +39,12 @@ func (req *channelRequest) finish(res interface{}, err error) error {
 	return nil
 }
 
-func (req *channelRequest) IsClosed() bool {
-	return req.closed
-}
-
 func (req *channelRequest) Close() error {
 	return req.finish(nil, ERR_CH_REQ_WAS_CLOSED)
 }
 
-func (req *channelRequest) bGetResponse(timeout time.Duration) (interface{}, error) {
+func (req *channelRequest) bGetResponse(timeout time.Duration) (
+	interface{}, error) {
 	var deadline <-chan time.Time = nil
 	if timeout != 0 {
 		deadline = time.After(timeout)

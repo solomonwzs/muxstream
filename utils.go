@@ -162,3 +162,21 @@ func (q *closerQueue) Close() error {
 	}
 	return nil
 }
+
+type flagClosed bool
+
+func (f flagClosed) IsClosed() bool {
+	return bool(f)
+}
+
+func writeAll(w io.Writer, p []byte) (n int, err error) {
+	pLen := len(p)
+	i := 0
+	for i < pLen {
+		if n, err = w.Write(p[i:]); err != nil {
+		} else {
+			i += n
+		}
+	}
+	return
+}

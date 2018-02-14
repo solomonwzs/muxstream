@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"time"
 )
 
 type streamManager struct {
@@ -64,13 +65,12 @@ func (m *streamManager) Close() error {
 }
 
 type Session struct {
-	rwc io.ReadWriteCloser
+	flagClosed
 
+	rwc          io.ReadWriteCloser
 	nextStreamID uint32
-
-	conf    *Config
-	closed  bool
-	streamM *streamManager
+	conf         *Config
+	streamM      *streamManager
 
 	eventChannel chan *event
 	sendQueue    chan *event
@@ -81,7 +81,7 @@ func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
 		rwc:          rwc,
 		nextStreamID: _MIN_STREAM_ID,
 		conf:         conf,
-		closed:       false,
+		flagClosed:   false,
 		streamM:      newStreamManager(),
 		eventChannel: make(chan *event, _CHANNEL_SIZE),
 		sendQueue:    make(chan *event, _CHANNEL_SIZE),
@@ -144,6 +144,9 @@ func (s *Session) processFrame(f *frame) (err error) {
 func (s *Session) serv() {
 	go s.recvLoop()
 	go s.sendLoop()
+	if s.conf.heartbeatDuration > 0 {
+		go s.heartbeat()
+	}
 
 	for e := range s.eventChannel {
 		switch e.typ {
@@ -250,28 +253,19 @@ func (s *Session) recvLoop() {
 }
 
 func (s *Session) sendLoop() {
-	var (
-		n   int
-		err error
-	)
-
 	for e := range s.sendQueue {
 		switch e.typ {
 		case _EVENT_SESSION_SL_SEND_FRAME:
 			req := e.data.(*channelRequest)
-			data := req.arg.(*frame).encode().Bytes()
-			dataLen := len(data)
-			i := 0
-			for i < dataLen {
-				if n, err = s.rwc.Write(data[i:]); err != nil {
-					newEvent(_EVENT_SESSION_SEND_ERROR, err).sendTo(
-						s.eventChannel)
-					break
-				} else {
-					i += n
-				}
+
+			f := req.arg.(*frame)
+			n, err := f.WriteTo(s.rwc)
+			if err != nil {
+				newEvent(_EVENT_SESSION_SEND_ERROR, err).sendTo(
+					s.eventChannel)
 			}
-			req.finish(n-_HEADER_SIZE, err)
+
+			req.finish(int(n-_HEADER_SIZE), err)
 			if err != nil {
 				return
 			}
@@ -282,10 +276,19 @@ func (s *Session) sendLoop() {
 }
 
 func (s *Session) heartbeat() {
+	f := &frame{
+		version: _PROTO_VER,
+		cmd:     _CMD_HEARTBEAT,
+	}
+	req := newChannelRequest(f, false)
+	for !s.flagClosed {
+		newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(s.sendQueue)
+		time.Sleep(s.conf.heartbeatDuration)
+	}
 }
 
 func (s *Session) terminal() {
-	s.closed = true
+	s.flagClosed = true
 	newEvent(_EVENT_SESSION_SL_CLOSE, nil).sendTo(s.sendQueue)
 
 	go waitForEventChannelClean(s.eventChannel)
@@ -308,6 +311,10 @@ func (s *Session) AcceptStream() (*Stream, error) {
 	} else {
 		return stream.(*Stream), nil
 	}
+}
+
+func (s *Session) Accept() (*Stream, error) {
+	return s.AcceptStream()
 }
 
 func (s *Session) OpenStream() (*Stream, error) {
@@ -337,6 +344,10 @@ func (s *Session) LocalAddr() net.Addr {
 	}
 }
 
+func (s *Session) Addr() net.Addr {
+	return s.LocalAddr()
+}
+
 func (s *Session) RemoteAddr() net.Addr {
 	if conn, ok := s.rwc.(net.Conn); ok {
 		return conn.RemoteAddr()
@@ -345,11 +356,10 @@ func (s *Session) RemoteAddr() net.Addr {
 	}
 }
 
-func (s *Session) IsClosed() bool {
-	return s.closed
-}
-
 func (s *Session) Close() error {
+	if s.flagClosed {
+		return ERR_SESSION_WAS_CLOSED
+	}
 	newEvent(_EVENT_SESSION_CLOSE, nil).sendTo(s.eventChannel)
 	return nil
 }

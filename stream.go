@@ -12,8 +12,8 @@ type readBufferArg struct {
 }
 
 type Stream struct {
+	flagClosed
 	streamID      uint32
-	closed        bool
 	session       *Session
 	readBuf       [][]byte
 	readReqQueue  *closerQueue
@@ -25,7 +25,7 @@ type Stream struct {
 func newStream(streamID uint32, s *Session) *Stream {
 	stream := &Stream{
 		streamID:     streamID,
-		closed:       false,
+		flagClosed:   false,
 		session:      s,
 		readBuf:      [][]byte{},
 		readReqQueue: newCloserQueue(),
@@ -35,10 +35,6 @@ func newStream(streamID uint32, s *Session) *Stream {
 	stream.writeDeadline.Store(time.Time{})
 	go stream.serv()
 	return stream
-}
-
-func (stream *Stream) IsClosed() bool {
-	return stream.closed
 }
 
 func (stream *Stream) packDataFrame(p []byte) *frame {
@@ -56,7 +52,7 @@ func (stream *Stream) serv() {
 		case _EVENT_STREAM_CLOSE:
 			goto end
 		case _EVENT_STREAM_CLOSE_WAIT:
-			stream.closed = true
+			stream.flagClosed = true
 			if len(stream.readBuf) == 0 {
 				goto end
 			} else {
@@ -132,9 +128,9 @@ func (stream *Stream) newReadReq(p []byte) (*channelRequest, error) {
 }
 
 func (stream *Stream) Read(p []byte) (int, error) {
-	if stream.session.closed {
+	if stream.session.flagClosed {
 		return 0, ERR_CLOSED_SESSION
-	} else if stream.closed && len(stream.readBuf) == 0 {
+	} else if stream.flagClosed && len(stream.readBuf) == 0 {
 		return 0, ERR_CLOSED_STREAM
 	}
 
@@ -152,9 +148,9 @@ func (stream *Stream) Read(p []byte) (int, error) {
 }
 
 func (stream *Stream) Write(p []byte) (n int, err error) {
-	if stream.session.closed {
+	if stream.session.flagClosed {
 		return 0, ERR_CLOSED_SESSION
-	} else if stream.closed {
+	} else if stream.flagClosed {
 		return 0, ERR_CLOSED_STREAM
 	}
 
@@ -196,6 +192,9 @@ func (stream *Stream) writeFrame(f *frame) (int, error) {
 }
 
 func (stream *Stream) Close() (err error) {
+	if stream.flagClosed {
+		return ERR_STREAM_WAS_CLOSED
+	}
 	newEvent(_EVENT_STREAM_CLOSE, nil).sendTo(stream.eventChannel)
 	return
 }
@@ -229,7 +228,7 @@ func (stream *Stream) SetDeadline(t time.Time) error {
 }
 
 func (stream *Stream) terminal() {
-	stream.closed = true
+	stream.flagClosed = true
 	newEvent(_EVENT_STREAM_TERMINAL, stream.streamID).sendTo(
 		stream.session.eventChannel)
 
