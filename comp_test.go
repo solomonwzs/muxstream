@@ -146,18 +146,18 @@ func BenchmarkSmuxSpeed16M(b *testing.B) {
 	benchmarkSmuxSpeed(b, 16*1024*1024)
 }
 
-func BenchmarkYamuxSpeed32K(b *testing.B) {
-	benchmarkYamuxSpeed(b, 32*1024)
-}
+// func BenchmarkYamuxSpeed32K(b *testing.B) {
+// 	benchmarkYamuxSpeed(b, 32*1024)
+// }
 
-func BenchmarkYamuxSpeed16M(b *testing.B) {
-	benchmarkYamuxSpeed(b, 16*1024*1024)
-}
+// func BenchmarkYamuxSpeed16M(b *testing.B) {
+// 	benchmarkYamuxSpeed(b, 16*1024*1024)
+// }
 
-func BenchmarkTcpSpeed32K(b *testing.B) {
-	benchmarkTcpSpeed(b, 32*1024)
-}
+// func BenchmarkTcpSpeed32K(b *testing.B) {
+// 	benchmarkTcpSpeed(b, 32*1024)
+// }
 
-func BenchmarkTcpSpeed16M(b *testing.B) {
-	benchmarkTcpSpeed(b, 16*1024*1024)
-}
+// func BenchmarkTcpSpeed16M(b *testing.B) {
+// 	benchmarkTcpSpeed(b, 16*1024*1024)
+// }

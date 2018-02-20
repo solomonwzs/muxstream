@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -11,6 +12,7 @@ type streamManager struct {
 	streams     map[uint32]*Stream
 	reqQueue    *closerQueue
 	idleStreams *closerQueue
+	lock        *sync.RWMutex
 }
 
 func newStreamManager() *streamManager {
@@ -18,10 +20,13 @@ func newStreamManager() *streamManager {
 		streams:     make(map[uint32]*Stream),
 		reqQueue:    newCloserQueue(),
 		idleStreams: newCloserQueue(),
+		lock:        &sync.RWMutex{},
 	}
 }
 
 func (m *streamManager) streamIn(stream *Stream) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
 	m.streams[stream.streamID] = stream
 	if m.reqQueue.isEmpty() {
 		m.idleStreams.push(stream)
@@ -32,6 +37,8 @@ func (m *streamManager) streamIn(stream *Stream) {
 }
 
 func (m *streamManager) requestIn(req *channelRequest) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
 	if m.idleStreams.isEmpty() {
 		m.reqQueue.push(req)
 	} else {
@@ -41,21 +48,29 @@ func (m *streamManager) requestIn(req *channelRequest) {
 }
 
 func (m *streamManager) get(id uint32) (*Stream, bool) {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 	stream, exist := m.streams[id]
 	return stream, exist
 }
 
 func (m *streamManager) del(id uint32) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
 	if _, exist := m.streams[id]; exist {
 		delete(m.streams, id)
 	}
 }
 
 func (m *streamManager) size() int {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 	return len(m.streams)
 }
 
 func (m *streamManager) Close() error {
+	m.lock.Lock()
+	defer m.lock.Unlock()
 	closeEvent := newEvent(_EVENT_STREAM_CLOSE, nil)
 	for _, stream := range m.streams {
 		closeEvent.sendTo(stream.eventChannel)
@@ -74,6 +89,7 @@ type Session struct {
 
 	eventChannel chan *event
 	sendQueue    chan *event
+	resOK        chan interface{}
 }
 
 func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
@@ -85,6 +101,7 @@ func NewSession(rwc io.ReadWriteCloser, conf *Config) (*Session, error) {
 		streamM:      newStreamManager(),
 		eventChannel: make(chan *event, _CHANNEL_SIZE),
 		sendQueue:    make(chan *event, _CHANNEL_SIZE),
+		resOK:        make(chan interface{}, 1),
 	}
 	go s.serv()
 	return s, nil
@@ -127,8 +144,10 @@ func (s *Session) processFrame(f *frame) (err error) {
 		}
 	case _CMD_DATA:
 		if stream, exist := s.streamM.get(f.streamID); exist {
-			newEvent(_EVENT_STREAM_DATA_IN, f.data).sendTo(
+			req := newChannelRequest(f.data, true)
+			newEvent(_EVENT_STREAM_DATA_IN, req).sendTo(
 				stream.eventChannel)
+			req.bGetResponse(0)
 		}
 	case _CMD_HEARTBEAT:
 	case _CMD_STREAM_CLOSE:
@@ -150,9 +169,6 @@ func (s *Session) serv() {
 
 	for e := range s.eventChannel {
 		switch e.typ {
-		case _EVENT_SESSION_FRAME_IN:
-			f := e.data.(*frame)
-			s.processFrame(f)
 		case _EVENT_SESSION_RECV_ERROR:
 			err := e.data.(error)
 			if err != ERR_PROTO_VERSION && err != ERR_UNKNOWN_CMD {
@@ -194,23 +210,18 @@ end:
 	s.terminal()
 }
 
-func (s *Session) readFrame() (f *frame, err error) {
-	var (
-		twoBytes = make([]byte, 2, 2)
-		dataLen  uint16
-	)
-
-	_, err = io.ReadFull(s.rwc, twoBytes)
+func (s *Session) readFrame(buf []byte) (f *frame, err error) {
+	_, err = io.ReadFull(s.rwc, buf[:2])
 	if err != nil {
 		return
-	} else if twoBytes[0] != _PROTO_VER {
+	} else if buf[0] != _PROTO_VER {
 		err = ERR_PROTO_VERSION
 		return
 	}
 
 	f = &frame{
 		version:  _PROTO_VER,
-		cmd:      twoBytes[1],
+		cmd:      buf[1],
 		streamID: 0,
 		data:     nil,
 	}
@@ -219,6 +230,7 @@ func (s *Session) readFrame() (f *frame, err error) {
 	case _CMD_NEW_STREAM_ACK:
 		err = binary.Read(s.rwc, binary.BigEndian, &f.streamID)
 	case _CMD_DATA:
+		var dataLen uint16
 		err = binary.Read(s.rwc, binary.BigEndian, &f.streamID)
 		if err != nil {
 			return
@@ -227,8 +239,8 @@ func (s *Session) readFrame() (f *frame, err error) {
 		if err != nil {
 			return
 		}
-		f.data = make([]byte, dataLen, dataLen)
-		_, err = io.ReadFull(s.rwc, f.data)
+		_, err = io.ReadFull(s.rwc, buf[:dataLen])
+		f.data = buf[:dataLen]
 	case _CMD_STREAM_CLOSE:
 		err = binary.Read(s.rwc, binary.BigEndian, &f.streamID)
 	case _CMD_HEARTBEAT:
@@ -240,14 +252,15 @@ func (s *Session) readFrame() (f *frame, err error) {
 }
 
 func (s *Session) recvLoop() {
+	buf := make([]byte, _MAX_BUFFER_SIZE, _MAX_BUFFER_SIZE)
 	for {
-		if f, err := s.readFrame(); err != nil {
+		if f, err := s.readFrame(buf); err != nil {
 			newEvent(_EVENT_SESSION_RECV_ERROR, err).sendTo(s.eventChannel)
 			if err != ERR_PROTO_VERSION && err != ERR_UNKNOWN_CMD {
 				break
 			}
 		} else {
-			newEvent(_EVENT_SESSION_FRAME_IN, f).sendTo(s.eventChannel)
+			s.processFrame(f)
 		}
 	}
 }
