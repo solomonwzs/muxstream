@@ -71,8 +71,8 @@ func setupTcpConn(tb testing.TB) (sConn, cConn net.Conn) {
 func setupSession(tb testing.TB, sConf, cConf *Config) (
 	server *Session, client *Session) {
 	sConn, cConn := setupTcpConn(tb)
-	server, _ = NewSession(sConn, sConf)
-	client, _ = NewSession(cConn, cConf)
+	server, _ = Server(sConn, sConf)
+	client, _ = Client(cConn, cConf)
 	return
 }
 
@@ -98,7 +98,7 @@ func echoServer(tb testing.TB, stream net.Conn) {
 	p := make([]byte, 1024, 1024)
 	for {
 		if n, err := stream.Read(p); err != nil {
-			if err != ERR_CH_REQ_WAS_CLOSED && err != ERR_CLOSED_STREAM {
+			if err != ERR_CH_WAS_CLOSED && err != ERR_STREAM_WAS_CLOSED && err != io.EOF {
 				tb.Fatal("server:", err)
 			}
 			break
@@ -113,7 +113,7 @@ func simpleServer(tb testing.TB, session *Session) {
 		if stream, err := session.AcceptStream(); err == nil {
 			go echoServer(tb, stream)
 		} else {
-			if err != ERR_CH_REQ_WAS_CLOSED &&
+			if err != ERR_CH_WAS_CLOSED &&
 				err != ERR_SESSION_WAS_CLOSED {
 				tb.Error(err)
 			}
@@ -124,7 +124,7 @@ func simpleServer(tb testing.TB, session *Session) {
 
 func TestBasic(t *testing.T) {
 	server, client := setupSession(t,
-		(&Config{}).SetServer(), (&Config{}).SetClient())
+		DefaultConfig(), DefaultConfig())
 	ss, cs := setupStream(t, server, client)
 
 	p0 := []byte("0123456789")
@@ -141,8 +141,6 @@ func TestBasic(t *testing.T) {
 	if n, err := ss.Read(p1); err != nil {
 		t.Fatal(err)
 	} else if string(p0) != string(p1[:n]) {
-		fmt.Println(string(p0))
-		fmt.Println(string(p1[:n]))
 		t.Fatal("error response")
 	}
 
@@ -152,7 +150,7 @@ func TestBasic(t *testing.T) {
 
 func TestEcho(t *testing.T) {
 	server, client := setupSession(t,
-		(&Config{}).SetServer(), (&Config{}).SetClient())
+		DefaultConfig(), DefaultConfig())
 	ss, cs := setupStream(t, server, client)
 
 	var wg sync.WaitGroup
@@ -189,7 +187,7 @@ func TestEcho(t *testing.T) {
 
 func TestParallel(t *testing.T) {
 	server, client := setupSession(t,
-		(&Config{}).SetServer(), (&Config{}).SetClient())
+		DefaultConfig(), DefaultConfig())
 	pnum := 300
 	rnum := 300
 
@@ -253,7 +251,7 @@ func TestParallel(t *testing.T) {
 					} else if n, err := stream.Read(p); err != nil {
 						t.Fatal(err)
 					} else if string(p[:n]) != msg {
-						t.Fatalf("client: error, expect: %s, revice: %s",
+						t.Fatal("client: error, expect: %s, revice: %s",
 							msg, string(p[:n]))
 					}
 					countCh <- true
@@ -271,9 +269,9 @@ func TestParallel(t *testing.T) {
 	wgCount.Wait()
 }
 
-func _TestRandomData(t *testing.T) {
+func TestRandomData(t *testing.T) {
 	server, client := setupSession(t,
-		(&Config{}).SetServer(), (&Config{}).SetClient())
+		DefaultConfig(), DefaultConfig())
 	go simpleServer(t, server)
 
 	for i := 0; i < 100; i++ {
@@ -287,7 +285,7 @@ func _TestRandomData(t *testing.T) {
 
 func _TestReadDeadline(t *testing.T) {
 	server, client := setupSession(t,
-		(&Config{}).SetServer(), (&Config{}).SetClient())
+		DefaultConfig(), DefaultConfig())
 	go simpleServer(t, server)
 
 	var wg sync.WaitGroup
@@ -314,8 +312,8 @@ func _TestWriteDeadline(t *testing.T) {
 	delay := 40 * time.Millisecond
 	sConn, cConn0 := setupTcpConn(t)
 	cConn := &slowNetConn{cConn0, 2 * delay}
-	server, _ := NewSession(sConn, (&Config{}).SetServer())
-	client, _ := NewSession(cConn, (&Config{}).SetClient())
+	server, _ := Server(sConn, DefaultConfig())
+	client, _ := Client(cConn, DefaultConfig())
 	go simpleServer(t, server)
 
 	var wg sync.WaitGroup

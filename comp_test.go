@@ -45,7 +45,7 @@ func simpleRW(tb testing.TB, conn0, conn1 net.Conn,
 
 func benchmarkMuxSpeed(b *testing.B, size int) {
 	server, client := setupSession(b,
-		(&Config{}).SetServer(), (&Config{}).SetClient())
+		DefaultConfig(), DefaultConfig())
 	ss, cs := setupStream(b, server, client)
 
 	buf0 := make([]byte, size, size)
@@ -73,7 +73,7 @@ func benchmarkSmuxSpeed(b *testing.B, size int) {
 	conf := &smux.Config{
 		KeepAliveInterval: 10 * time.Second,
 		KeepAliveTimeout:  30 * time.Second,
-		MaxFrameSize:      65000,
+		MaxFrameSize:      32 * 1024,
 		MaxReceiveBuffer:  4194304,
 	}
 	server, _ := smux.Server(sConn, conf)
@@ -146,18 +146,18 @@ func BenchmarkSmuxSpeed16M(b *testing.B) {
 	benchmarkSmuxSpeed(b, 16*1024*1024)
 }
 
-// func BenchmarkYamuxSpeed32K(b *testing.B) {
-// 	benchmarkYamuxSpeed(b, 32*1024)
-// }
+func BenchmarkYamuxSpeed32K(b *testing.B) {
+	benchmarkYamuxSpeed(b, 32*1024)
+}
 
-// func BenchmarkYamuxSpeed16M(b *testing.B) {
-// 	benchmarkYamuxSpeed(b, 16*1024*1024)
-// }
+func BenchmarkYamuxSpeed16M(b *testing.B) {
+	benchmarkYamuxSpeed(b, 16*1024*1024)
+}
 
-// func BenchmarkTcpSpeed32K(b *testing.B) {
-// 	benchmarkTcpSpeed(b, 32*1024)
-// }
+func BenchmarkTcpSpeed32K(b *testing.B) {
+	benchmarkTcpSpeed(b, 32*1024)
+}
 
-// func BenchmarkTcpSpeed16M(b *testing.B) {
-// 	benchmarkTcpSpeed(b, 16*1024*1024)
-// }
+func BenchmarkTcpSpeed16M(b *testing.B) {
+	benchmarkTcpSpeed(b, 16*1024*1024)
+}

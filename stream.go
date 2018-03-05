@@ -2,211 +2,213 @@ package muxstream
 
 import (
 	"bytes"
+	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type readBufferArg struct {
-	p       []byte
-	timeout time.Duration
+type tempWriter struct {
+	p  []byte
+	ch chan int
+}
+
+func newTempWriter(p []byte) *tempWriter {
+	return &tempWriter{
+		p:  p,
+		ch: make(chan int, 1),
+	}
+}
+
+func (t *tempWriter) Write(p []byte) (n int, err error) {
+	n = copy(t.p, p)
+	t.ch <- n
+	return
 }
 
 type Stream struct {
-	flagClosed
-	streamID      uint32
-	session       *Session
-	readBuf       *bytes.Buffer
-	readReqQueue  *closerQueue
-	eventChannel  chan *event
+	streamID uint32
+	sess     *Session
+
+	buffer       *bytes.Buffer
+	bufferLock   *sync.Mutex
+	readyForRead chan struct{}
+
+	end     chan struct{}
+	endLock *sync.Mutex
+
 	readDeadline  atomic.Value
 	writeDeadline atomic.Value
 }
 
-func newStream(streamID uint32, s *Session) *Stream {
-	stream := &Stream{
-		streamID:     streamID,
-		flagClosed:   false,
-		session:      s,
-		readBuf:      new(bytes.Buffer),
-		readReqQueue: newCloserQueue(),
-		eventChannel: make(chan *event, _CHANNEL_SIZE),
+func newStream(streamID uint32, sess *Session) *Stream {
+	s := &Stream{
+		streamID: streamID,
+		sess:     sess,
+
+		buffer:       new(bytes.Buffer),
+		bufferLock:   &sync.Mutex{},
+		readyForRead: make(chan struct{}, 1),
+
+		end:     make(chan struct{}),
+		endLock: &sync.Mutex{},
 	}
-	stream.readDeadline.Store(time.Time{})
-	stream.writeDeadline.Store(time.Time{})
-	go stream.serv()
-	return stream
+	s.readDeadline.Store(time.Time{})
+	s.writeDeadline.Store(time.Time{})
+	return s
 }
 
-func (stream *Stream) serv() {
-	for e := range stream.eventChannel {
-		switch e.typ {
-		case _EVENT_STREAM_CLOSE:
-			goto end
-		case _EVENT_STREAM_CLOSE_WAIT:
-			stream.flagClosed = true
-			if stream.readBuf.Len() == 0 {
-				goto end
-			} else {
-				go newEvent(_EVENT_STREAM_CLOSE_WAIT, nil).sendToAfter(
-					stream.eventChannel, 1*time.Second)
-			}
-		case _EVENT_STREAM_DATA_IN:
-			dReq := e.data.(*channelRequest)
-			data := dReq.arg.([]byte)
-			i := 0
-			for !stream.readReqQueue.isEmpty() && i < len(data) {
-				req := stream.readReqQueue.pop().(*channelRequest)
-				n := copy(req.arg.(*readBufferArg).p, data[i:])
-				req.finish(n, nil)
-				i += n
-			}
-			if i < len(data) {
-				stream.readBuf.Write(data[i:])
-			}
-			dReq.finish(struct{}{}, nil)
-		case _EVENT_STREAM_READ_REQ:
-			req := e.data.(*channelRequest)
-			if stream.readReqQueue.isEmpty() && stream.readBuf.Len() != 0 {
-				n, err := stream.readBuf.Read(req.arg.(*readBufferArg).p)
-				req.finish(n, err)
-			} else {
-				stream.readReqQueue.push(req)
-				arg := req.arg.(*readBufferArg)
-				if arg.timeout > 0 {
-					go func() {
-						time.Sleep(arg.timeout)
-						newEvent(_EVENT_STREAM_READ_REQ_TIMEOUT, req).sendTo(
-							stream.eventChannel)
-					}()
-				}
-			}
-		case _EVENT_STREAM_READ_REQ_TIMEOUT:
-			req := e.data.(*channelRequest)
-			req.finish(0, ERR_STREAM_IO_TIMEOUT)
-		}
+func (s *Stream) IsClosed() bool {
+	select {
+	case <-s.end:
+		return true
+	default:
+		return false
 	}
-end:
-	stream.terminal()
 }
 
-func (stream *Stream) newReadReq(p []byte) (*channelRequest, error) {
-	var timeout time.Duration = 0
-	if t, ok := stream.readDeadline.Load().(time.Time); ok && !t.IsZero() {
-		timeout = time.Until(t)
-		if timeout <= 0 {
-			return nil, ERR_STREAM_IO_TIMEOUT
-		}
-	}
-	return newChannelRequest(&readBufferArg{p, timeout}, true), nil
-}
+func (s *Stream) terminal(tf func() error) error {
+	s.endLock.Lock()
+	defer s.endLock.Unlock()
 
-func (stream *Stream) Read(p []byte) (int, error) {
-	if stream.session.flagClosed {
-		return 0, ERR_CLOSED_SESSION
-	} else if stream.flagClosed && stream.readBuf.Len() == 0 {
-		return 0, ERR_CLOSED_STREAM
-	}
-
-	req, err := stream.newReadReq(p)
-	if err != nil {
-		return 0, err
-	}
-	newEvent(_EVENT_STREAM_READ_REQ, req).sendTo(stream.eventChannel)
-	n0, err := req.bGetResponse(0)
-	n := 0
-	if n0 != nil {
-		n = n0.(int)
-	}
-	return n, err
-}
-
-func (stream *Stream) Write(p []byte) (n int, err error) {
-	if stream.session.flagClosed {
-		return 0, ERR_CLOSED_SESSION
-	} else if stream.flagClosed {
-		return 0, ERR_CLOSED_STREAM
-	}
-
-	fs := newDataFrames(stream.streamID, p)
-	n = 0
-	err = nil
-	for _, f := range fs {
-		if n0, err0 := stream.writeFrame(f); err0 == nil {
-			n += n0
-		} else {
-			return n + n0, err0
-		}
-	}
-	return
-}
-
-func (stream *Stream) writeFrame(f *frame) (int, error) {
-	var timeout time.Duration = 0
-	t, ok := stream.writeDeadline.Load().(time.Time)
-	if ok && !t.IsZero() {
-		timeout = time.Until(t)
-		if timeout <= 0 {
-			return 0, ERR_STREAM_IO_TIMEOUT
-		}
-	}
-
-	req := newChannelRequest(f, true)
-	newEvent(_EVENT_SESSION_SL_SEND_FRAME, req).sendTo(
-		stream.session.sendQueue)
-	n0, err := req.bGetResponse(timeout)
-	n := 0
-	if n0 != nil {
-		n = n0.(int)
-	}
-	if err == ERR_CH_REQ_TIMEOUT {
-		err = ERR_STREAM_IO_TIMEOUT
-	}
-	return n, err
-}
-
-func (stream *Stream) Close() (err error) {
-	if stream.flagClosed {
+	if s.IsClosed() {
 		return ERR_STREAM_WAS_CLOSED
 	}
-	newEvent(_EVENT_STREAM_CLOSE, nil).sendTo(stream.eventChannel)
+	close(s.end)
+
+	req := newFrameRequest(&frame{
+		version:  _PROTO_VER,
+		cmd:      _CMD_STREAM_CLOSE,
+		streamID: s.streamID,
+		data:     nil,
+	}, false)
+	req.send(s.sess, 0)
+
+	if tf != nil {
+		return tf()
+	}
+	return nil
+}
+
+func (s *Stream) Close() error {
+	return s.terminal(func() error {
+		s.sess.streamsLock.Lock()
+		delete(s.sess.streams, s.streamID)
+		s.sess.streamsLock.Unlock()
+		return nil
+	})
+}
+
+func (s *Stream) notifyRead() {
+	select {
+	case s.readyForRead <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Stream) copyToBuffer(r io.Reader, dataLen uint16) {
+	s.bufferLock.Lock()
+	io.CopyN(s.buffer, r, int64(dataLen))
+	if s.buffer.Len() > 0 {
+		s.notifyRead()
+	}
+	s.bufferLock.Unlock()
+}
+
+func (s *Stream) Read(p []byte) (n int, err error) {
+	if s.buffer.Len() == 0 {
+		if s.IsClosed() {
+			return 0, ERR_STREAM_WAS_CLOSED
+		}
+		if s.sess.IsClosed() {
+			return 0, ERR_SESSION_WAS_CLOSED
+		}
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	for {
+		s.bufferLock.Lock()
+		n, err = s.buffer.Read(p)
+		if s.buffer.Len() > 0 {
+			s.notifyRead()
+		}
+		s.bufferLock.Unlock()
+
+		if n > 0 {
+			return
+		}
+		select {
+		case <-s.readyForRead:
+			break
+		case <-s.end:
+			return 0, io.EOF
+		}
+	}
+}
+
+func (s *Stream) Write(p []byte) (n int, err error) {
+	if s.IsClosed() {
+		return 0, ERR_STREAM_WAS_CLOSED
+	}
+	if s.sess.IsClosed() {
+		return 0, ERR_SESSION_WAS_CLOSED
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	n = 0
+	dataLen := len(p)
+	f := &frame{
+		version:  _PROTO_VER,
+		cmd:      _CMD_DATA,
+		streamID: s.streamID,
+	}
+	for n < dataLen {
+		m := n + s.sess.conf.maxFrameSize
+		if m > dataLen {
+			m = dataLen
+		}
+		f.data = p[n:m]
+
+		req := newFrameRequest(f, true)
+		n0, err0 := req.send(s.sess, 0)
+		if err0 != nil {
+			return n, err0
+		} else {
+			n += n0 - _FRAME_HEADER_SIZE
+		}
+	}
 	return
 }
 
-func (stream *Stream) LocalAddr() net.Addr {
-	return stream.session.LocalAddr()
+func (s *Stream) LocalAddr() net.Addr {
+	return s.sess.LocalAddr()
 }
 
-func (stream *Stream) RemoteAddr() net.Addr {
-	return stream.session.RemoteAddr()
+func (s *Stream) RemoteAddr() net.Addr {
+	return s.sess.RemoteAddr()
 }
 
-func (stream *Stream) SetReadDeadline(t time.Time) error {
-	stream.readDeadline.Store(t)
+func (s *Stream) SetReadDeadline(t time.Time) error {
+	s.readDeadline.Store(t)
 	return nil
 }
 
-func (stream *Stream) SetWriteDeadline(t time.Time) error {
-	stream.writeDeadline.Store(t)
+func (s *Stream) SetWriteDeadline(t time.Time) error {
+	s.writeDeadline.Store(t)
 	return nil
 }
 
-func (stream *Stream) SetDeadline(t time.Time) error {
-	if err := stream.SetReadDeadline(t); err != nil {
+func (s *Stream) SetDeadline(t time.Time) error {
+	if err := s.SetReadDeadline(t); err != nil {
 		return err
 	}
-	if err := stream.SetWriteDeadline(t); err != nil {
+	if err := s.SetWriteDeadline(t); err != nil {
 		return err
 	}
 	return nil
-}
-
-func (stream *Stream) terminal() {
-	stream.flagClosed = true
-	newEvent(_EVENT_STREAM_TERMINAL, stream.streamID).sendTo(
-		stream.session.eventChannel)
-
-	go waitForEventChannelClean(stream.eventChannel)
-
-	stream.readReqQueue.Close()
 }

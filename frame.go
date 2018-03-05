@@ -1,9 +1,12 @@
 package muxstream
 
 import (
-	"bytes"
 	"encoding/binary"
 	"io"
+)
+
+const (
+	_FRAME_HEADER_SIZE = 8
 )
 
 type frame struct {
@@ -13,67 +16,29 @@ type frame struct {
 	data     []byte
 }
 
-func newDataFrames(streamID uint32, data []byte) []*frame {
-	dataLen := len(data)
-	if dataLen == 0 {
-		return nil
-	}
+func (f *frame) writeTo(w io.Writer, buf []byte) (n int, err error) {
+	// header := make([]byte, _FRAME_HEADER_SIZE, _FRAME_HEADER_SIZE)
+	// header[0] = f.version
+	// header[1] = f.cmd
+	// binary.BigEndian.PutUint32(header[2:], f.streamID)
+	// binary.BigEndian.PutUint16(header[6:], uint16(len(f.data)))
 
-	n := dataLen / _MAX_BUFFER_SIZE
-	if dataLen%_MAX_BUFFER_SIZE != 0 {
-		n += 1
-	}
-	fs := make([]*frame, n, n)
-	for i := 0; i < n; i++ {
-		var p []byte
-		if i < n-1 {
-			p = data[i*_MAX_BUFFER_SIZE : (i+1)*_MAX_BUFFER_SIZE]
-		} else {
-			p = data[i*_MAX_BUFFER_SIZE:]
-		}
-		fs[i] = &frame{
-			version:  _PROTO_VER,
-			cmd:      _CMD_DATA,
-			streamID: streamID,
-			data:     p,
-		}
-	}
-	return fs
-}
+	// if _, err = w.Write(header[:_FRAME_HEADER_SIZE]); err != nil {
+	// 	return
+	// }
+	// if n, err = w.Write(f.data); err != nil {
+	// 	return _FRAME_HEADER_SIZE + n, err
+	// } else {
+	// 	return _FRAME_HEADER_SIZE + n, nil
+	// }
 
-func (f *frame) header() (buf *bytes.Buffer) {
-	buf = new(bytes.Buffer)
-	buf.Write([]byte{f.version, f.cmd})
+	buf[0] = f.version
+	buf[1] = f.cmd
+	binary.BigEndian.PutUint32(buf[2:], f.streamID)
+	binary.BigEndian.PutUint16(buf[6:], uint16(len(f.data)))
 
-	if f.streamID < _MIN_STREAM_ID {
-		return
-	}
-	binary.Write(buf, binary.BigEndian, f.streamID)
+	copy(buf[_FRAME_HEADER_SIZE:_FRAME_HEADER_SIZE+len(f.data)], f.data)
+	n, err = w.Write(buf[:_FRAME_HEADER_SIZE+len(f.data)])
 
-	if len(f.data) == 0 {
-		return
-	}
-
-	binary.Write(buf, binary.BigEndian, uint16(len(f.data)))
 	return
-}
-
-func (f *frame) WriteTo(w io.Writer) (n int64, err error) {
-	header := f.header().Bytes()
-
-	if n0, err0 := writeAll(w, header); err != nil {
-		return int64(n0), err0
-	} else {
-		n += int64(n0)
-	}
-
-	if len(f.data) == 0 {
-		return
-	}
-
-	if n0, err0 := writeAll(w, f.data); err0 != nil {
-		return n + int64(n0), err0
-	} else {
-		return n + int64(n0), nil
-	}
 }

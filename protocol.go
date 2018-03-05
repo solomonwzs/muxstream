@@ -22,6 +22,5 @@ const (
 )
 
 const (
-	_MIN_STREAM_ID = 1
-	_HEADER_SIZE   = 8
+	_LAST_CMD = _CMD_HEARTBEAT
 )

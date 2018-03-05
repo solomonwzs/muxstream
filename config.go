@@ -8,9 +8,17 @@ const (
 )
 
 type Config struct {
-	role                   uint8
+	maxFrameSize           int
 	heartbeatDuration      time.Duration
 	networkTimeoutDuration time.Duration
+}
+
+func DefaultConfig() *Config {
+	return &Config{
+		maxFrameSize:           32 * 1024,
+		heartbeatDuration:      0,
+		networkTimeoutDuration: 0,
+	}
 }
 
 func (conf *Config) SetHeartbeatDuration(t time.Duration) *Config {
@@ -23,12 +31,9 @@ func (conf *Config) SetNetworkTimeoutDuration(t time.Duration) *Config {
 	return conf
 }
 
-func (conf *Config) SetServer() *Config {
-	conf.role = _ROLE_SERVER
-	return conf
-}
-
-func (conf *Config) SetClient() *Config {
-	conf.role = _ROLE_CLIENT
+func (conf *Config) SetMaxFrameSize(size int) *Config {
+	if size <= _MAX_FRAME_SIZE {
+		conf.maxFrameSize = size
+	}
 	return conf
 }
