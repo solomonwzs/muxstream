@@ -2,7 +2,6 @@ package muxstream
 
 import (
 	"encoding/binary"
-	"io"
 )
 
 const (
@@ -16,29 +15,30 @@ type frame struct {
 	data     []byte
 }
 
-func (f *frame) writeTo(w io.Writer, buf []byte) (n int, err error) {
-	// header := make([]byte, _FRAME_HEADER_SIZE, _FRAME_HEADER_SIZE)
-	// header[0] = f.version
-	// header[1] = f.cmd
-	// binary.BigEndian.PutUint32(header[2:], f.streamID)
-	// binary.BigEndian.PutUint16(header[6:], uint16(len(f.data)))
+func (f *frame) raw(p []byte) int {
+	p[0] = f.version
+	p[1] = f.cmd
+	binary.BigEndian.PutUint32(p[2:], f.streamID)
+	binary.BigEndian.PutUint16(p[6:], uint16(len(f.data)))
+	copy(p[_FRAME_HEADER_SIZE:], f.data)
 
-	// if _, err = w.Write(header[:_FRAME_HEADER_SIZE]); err != nil {
-	// 	return
-	// }
-	// if n, err = w.Write(f.data); err != nil {
-	// 	return _FRAME_HEADER_SIZE + n, err
-	// } else {
-	// 	return _FRAME_HEADER_SIZE + n, nil
-	// }
+	return _FRAME_HEADER_SIZE + len(f.data)
+}
 
-	buf[0] = f.version
-	buf[1] = f.cmd
-	binary.BigEndian.PutUint32(buf[2:], f.streamID)
-	binary.BigEndian.PutUint16(buf[6:], uint16(len(f.data)))
+type frameRaw []byte
 
-	copy(buf[_FRAME_HEADER_SIZE:_FRAME_HEADER_SIZE+len(f.data)], f.data)
-	n, err = w.Write(buf[:_FRAME_HEADER_SIZE+len(f.data)])
+func (raw frameRaw) version() byte {
+	return raw[0]
+}
 
-	return
+func (raw frameRaw) cmd() byte {
+	return raw[1]
+}
+
+func (raw frameRaw) streamID() uint32 {
+	return binary.BigEndian.Uint32(raw[2:])
+}
+
+func (raw frameRaw) dataLen() uint16 {
+	return binary.BigEndian.Uint16(raw[6:])
 }

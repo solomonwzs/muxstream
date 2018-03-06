@@ -283,7 +283,7 @@ func TestRandomData(t *testing.T) {
 	server.Close()
 }
 
-func _TestReadDeadline(t *testing.T) {
+func TestReadDeadline(t *testing.T) {
 	server, client := setupSession(t,
 		DefaultConfig(), DefaultConfig())
 	go simpleServer(t, server)
@@ -308,7 +308,7 @@ func _TestReadDeadline(t *testing.T) {
 	wg.Wait()
 }
 
-func _TestWriteDeadline(t *testing.T) {
+func TestWriteDeadline(t *testing.T) {
 	delay := 40 * time.Millisecond
 	sConn, cConn0 := setupTcpConn(t)
 	cConn := &slowNetConn{cConn0, 2 * delay}
@@ -329,7 +329,6 @@ func _TestWriteDeadline(t *testing.T) {
 			p := make([]byte, 16)
 			stream.SetWriteDeadline(time.Now().Add(delay))
 			if _, err = stream.Write(p); err != ERR_STREAM_IO_TIMEOUT {
-				fmt.Println(err)
 				t.Fatal("set write deadline fail")
 			}
 		}()

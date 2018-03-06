@@ -9,24 +9,6 @@ import (
 	"time"
 )
 
-type tempWriter struct {
-	p  []byte
-	ch chan int
-}
-
-func newTempWriter(p []byte) *tempWriter {
-	return &tempWriter{
-		p:  p,
-		ch: make(chan int, 1),
-	}
-}
-
-func (t *tempWriter) Write(p []byte) (n int, err error) {
-	n = copy(t.p, p)
-	t.ch <- n
-	return
-}
-
 type Stream struct {
 	streamID uint32
 	sess     *Session
@@ -77,13 +59,16 @@ func (s *Stream) terminal(tf func() error) error {
 	}
 	close(s.end)
 
-	req := newFrameRequest(&frame{
-		version:  _PROTO_VER,
-		cmd:      _CMD_STREAM_CLOSE,
-		streamID: s.streamID,
-		data:     nil,
-	}, false)
-	req.send(s.sess, 0)
+	req := frameRequest{
+		f: &frame{
+			version:  _PROTO_VER,
+			cmd:      _CMD_STREAM_CLOSE,
+			streamID: s.streamID,
+			data:     nil,
+		},
+		ch: nil,
+	}
+	s.sess.sendChannel <- req
 
 	if tf != nil {
 		return tf()
@@ -121,12 +106,13 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 		if s.IsClosed() {
 			return 0, ERR_STREAM_WAS_CLOSED
 		}
-		if s.sess.IsClosed() {
-			return 0, ERR_SESSION_WAS_CLOSED
-		}
 	}
-	if len(p) == 0 {
-		return 0, nil
+
+	var deadline <-chan time.Time
+	if d, ok := s.readDeadline.Load().(time.Time); ok && !d.IsZero() {
+		timer := time.NewTimer(time.Until(d))
+		defer timer.Stop()
+		deadline = timer.C
 	}
 
 	for {
@@ -143,6 +129,8 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 		select {
 		case <-s.readyForRead:
 			break
+		case <-deadline:
+			return 0, ERR_STREAM_IO_TIMEOUT
 		case <-s.end:
 			return 0, io.EOF
 		}
@@ -153,20 +141,23 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 	if s.IsClosed() {
 		return 0, ERR_STREAM_WAS_CLOSED
 	}
-	if s.sess.IsClosed() {
-		return 0, ERR_SESSION_WAS_CLOSED
-	}
-	if len(p) == 0 {
-		return 0, nil
+
+	var deadline <-chan time.Time
+	if d, ok := s.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
+		timer := time.NewTimer(time.Until(d))
+		defer timer.Stop()
+		deadline = timer.C
 	}
 
 	n = 0
 	dataLen := len(p)
-	f := &frame{
+	f := frame{
 		version:  _PROTO_VER,
 		cmd:      _CMD_DATA,
 		streamID: s.streamID,
 	}
+	req := frameRequest{ch: make(chan rwResult, 1)}
+
 	for n < dataLen {
 		m := n + s.sess.conf.maxFrameSize
 		if m > dataLen {
@@ -174,12 +165,18 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 		}
 		f.data = p[n:m]
 
-		req := newFrameRequest(f, true)
-		n0, err0 := req.send(s.sess, 0)
-		if err0 != nil {
-			return n, err0
-		} else {
-			n += n0 - _FRAME_HEADER_SIZE
+		req.f = &f
+		s.sess.sendChannel <- req
+		select {
+		case r := <-req.ch:
+			n += r.n - _FRAME_HEADER_SIZE
+			if r.err != nil {
+				return n, r.err
+			}
+		case <-deadline:
+			return n, ERR_STREAM_IO_TIMEOUT
+		case <-s.end:
+			return n, ERR_STREAM_WAS_CLOSED
 		}
 	}
 	return

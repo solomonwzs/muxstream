@@ -1,7 +1,6 @@
 package muxstream
 
 import (
-	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -15,45 +14,7 @@ type rwResult struct {
 
 type frameRequest struct {
 	f  *frame
-	ch chan *rwResult
-}
-
-func newFrameRequest(f *frame, waitForReturn bool) *frameRequest {
-	var ch chan *rwResult = nil
-	if waitForReturn {
-		ch = make(chan *rwResult, 1)
-	}
-	return &frameRequest{f: f, ch: ch}
-}
-
-func (fr *frameRequest) send(sess *Session, timeout time.Duration) (
-	n int, err error) {
-	select {
-	case sess.sendChannel <- fr:
-		break
-	default:
-		return 0, nil
-	}
-	if fr.ch == nil {
-		return
-	}
-
-	var deadline <-chan time.Time = nil
-	if timeout != 0 {
-		deadline = time.After(timeout)
-	}
-	select {
-	case r, ok := <-fr.ch:
-		if ok {
-			return r.n, r.err
-		} else {
-			return 0, ERR_CH_WAS_CLOSED
-		}
-	case <-sess.end:
-		return 0, ERR_SESSION_WAS_CLOSED
-	case <-deadline:
-		return 0, ERR_CH_TIMEOUT
-	}
+	ch chan rwResult
 }
 
 type Session struct {
@@ -68,7 +29,7 @@ type Session struct {
 	end     chan struct{}
 	endLock *sync.Mutex
 
-	sendChannel   chan *frameRequest
+	sendChannel   chan frameRequest
 	streamChannel chan *Stream
 }
 
@@ -94,7 +55,7 @@ func newSession(rwc io.ReadWriteCloser, conf *Config, role uint8) (
 		end:     make(chan struct{}),
 		endLock: &sync.Mutex{},
 
-		sendChannel:   make(chan *frameRequest, 1024),
+		sendChannel:   make(chan frameRequest, 1024),
 		streamChannel: make(chan *Stream),
 	}
 	go s.recvLoop()
@@ -116,19 +77,19 @@ func (sess *Session) readFrameHeader(buf []byte) (
 	_, err = io.ReadFull(sess.rwc, buf[:_FRAME_HEADER_SIZE])
 	if err != nil {
 		return
-	} else if buf[0] != _PROTO_VER {
+	}
+
+	raw := frameRaw(buf)
+	if raw.version() != _PROTO_VER {
 		err = ERR_PROTO_VERSION
 		return
 	}
-
-	cmd = buf[1]
-	if cmd > _LAST_CMD {
+	if cmd = raw.cmd(); cmd > _LAST_CMD {
 		err = ERR_UNKNOWN_CMD
 		return
 	}
-
-	streamID = binary.BigEndian.Uint32(buf[2:])
-	dataLen = binary.BigEndian.Uint16(buf[6:])
+	streamID = raw.streamID()
+	dataLen = raw.dataLen()
 
 	return
 }
@@ -153,7 +114,9 @@ func (sess *Session) recvLoop() {
 	buf := make([]byte, _FRAME_HEADER_SIZE, _FRAME_HEADER_SIZE)
 	for {
 		cmd, streamID, dataLen, err := sess.readFrameHeader(buf)
-		if err != nil {
+		if err == ERR_PROTO_VERSION || err == ERR_UNKNOWN_CMD {
+			continue
+		} else if err != nil {
 			return
 		}
 
@@ -164,7 +127,7 @@ func (sess *Session) recvLoop() {
 			}
 			sess.streamsLock.Lock()
 			if len(sess.streams) < _MAX_STREAMS_NUM {
-				for {
+				for !sess.IsClosed() {
 					if _, exist := sess.streams[sess.nextStreamID]; !exist {
 						stream := newStream(sess.nextStreamID, sess)
 						sess.streams[sess.nextStreamID] = stream
@@ -176,8 +139,8 @@ func (sess *Session) recvLoop() {
 							streamID: stream.streamID,
 							data:     nil,
 						}
-						req := newFrameRequest(rf, false)
-						req.send(sess, 0)
+						req := frameRequest{f: rf, ch: nil}
+						sess.sendChannel <- req
 						go sess.notifyNewStream(stream)
 						break
 					}
@@ -218,23 +181,31 @@ func (sess *Session) recvLoop() {
 func (sess *Session) sendLoop() {
 	buf := make([]byte, _FRAME_HEADER_SIZE+_MAX_FRAME_SIZE,
 		_FRAME_HEADER_SIZE+_MAX_FRAME_SIZE)
+
+	heartbeat := make(chan struct{})
+	if sess.conf.heartbeatDuration > 0 {
+		go func() {
+			select {
+			case <-sess.end:
+				return
+			case heartbeat <- struct{}{}:
+				time.Sleep(sess.conf.heartbeatDuration)
+			}
+		}()
+	}
+
 	for {
 		select {
 		case <-sess.end:
 			return
 		case req := <-sess.sendChannel:
-			buf[0] = req.f.version
-			buf[1] = req.f.cmd
-			binary.BigEndian.PutUint32(buf[2:], req.f.streamID)
-			binary.BigEndian.PutUint16(buf[6:], uint16(len(req.f.data)))
-
-			copy(buf[_FRAME_HEADER_SIZE:], req.f.data)
-			n, err := sess.rwc.Write(buf[:_FRAME_HEADER_SIZE+len(req.f.data)])
-
+			size := req.f.raw(buf)
+			n, err := sess.rwc.Write(buf[:size])
 			if req.ch != nil {
-				req.ch <- &rwResult{n, err}
-				close(req.ch)
+				req.ch <- rwResult{n, err}
 			}
+		case <-heartbeat:
+			sess.rwc.Write(_BYTES_HEARTBEAT)
 		}
 	}
 }
@@ -249,6 +220,10 @@ func (sess *Session) AcceptStream() (*Stream, error) {
 	return sess.recvStream()
 }
 
+func (sess *Session) Accept() (net.Conn, error) {
+	return sess.AcceptStream()
+}
+
 func (sess *Session) OpenStream() (*Stream, error) {
 	if sess.role != _ROLE_CLIENT {
 		return nil, ERR_NOT_CLIENT
@@ -257,8 +232,8 @@ func (sess *Session) OpenStream() (*Stream, error) {
 		return nil, ERR_SESSION_WAS_CLOSED
 	}
 
-	req := newFrameRequest(_FRAME_NEW_STREAM, false)
-	req.send(sess, 0)
+	req := frameRequest{f: _FRAME_NEW_STREAM, ch: nil}
+	sess.sendChannel <- req
 	return sess.recvStream()
 }
 
@@ -296,6 +271,8 @@ func (sess *Session) Close() error {
 		stream.terminal(nil)
 	}
 	sess.streamsLock.Unlock()
+
+	sess.rwc.Close()
 
 	return nil
 }
