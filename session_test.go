@@ -251,7 +251,7 @@ func TestParallel(t *testing.T) {
 					} else if n, err := stream.Read(p); err != nil {
 						t.Fatal(err)
 					} else if string(p[:n]) != msg {
-						t.Fatal("client: error, expect: %s, revice: %s",
+						t.Fatalf("client: error, expect: %s, revice: %s",
 							msg, string(p[:n]))
 					}
 					countCh <- true
