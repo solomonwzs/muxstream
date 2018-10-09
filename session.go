@@ -140,8 +140,13 @@ func (sess *Session) recvLoop() {
 							data:     nil,
 						}
 						req := frameRequest{f: rf, ch: nil}
-						sess.sendChannel <- req
-						go sess.notifyNewStream(stream)
+
+						select {
+						case sess.sendChannel <- req:
+							go sess.notifyNewStream(stream)
+						case <-sess.end:
+						}
+
 						break
 					}
 				}
@@ -228,13 +233,14 @@ func (sess *Session) OpenStream() (*Stream, error) {
 	if sess.role != _ROLE_CLIENT {
 		return nil, ERR_NOT_CLIENT
 	}
-	if sess.IsClosed() {
-		return nil, ERR_SESSION_WAS_CLOSED
-	}
 
 	req := frameRequest{f: _FRAME_NEW_STREAM, ch: nil}
-	sess.sendChannel <- req
-	return sess.recvStream()
+	select {
+	case sess.sendChannel <- req:
+		return sess.recvStream()
+	case <-sess.end:
+		return nil, ERR_SESSION_WAS_CLOSED
+	}
 }
 
 func (sess *Session) LocalAddr() net.Addr {
